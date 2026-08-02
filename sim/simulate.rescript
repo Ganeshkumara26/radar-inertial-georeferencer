@@ -1,0 +1,11 @@
+# Renode simulation test script for v10_cache_mpu
+mach create "stm32h7"
+machine LoadPlatformDescription @platforms/cpus/stm32h753.repl
+
+# The base stm32h753.repl already maps FMC SDRAM at 0xD0000000.
+
+sysbus LoadELF @build/edp_m7_firmware.elf
+
+sysbus.usart1 CreateFileBackend @uart_output.log true
+emulation RunFor "0.05"
+quit
