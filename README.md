@@ -36,7 +36,8 @@ These are the real, unglamorous bugs that happen when you write bare-metal firmw
 - **DMA memory corruption**: The DMA writes directly to memory, bypassing the CPU's L1 D-Cache. When the CPU then reads that same memory, it gets stale cache data. Fixed with `SCB_InvalidateDCache_by_Addr()`.
 - **CRC checksum mismatch**: The hardware CRC peripheral processes words MSB-first, but the CPU writes them LSB-first. Fixed by enabling `CRC_CR_REV_IN`.
 - **Stack overflow**: The 600KB circular buffer and the task stack were both placed in AXI SRAM, and the growing buffer clobbered the stack. Fixed by linker script surgery to place them in different regions.
-- **Context switch crash**: PendSV was set to the highest priority, so it preempted everything including fault handlers. Fixed by moving PendSV to the lowest priority via `SCB_SHPR3`.
+- **Context switch crash (Priority)**: PendSV was set to the highest priority, so it preempted everything including fault handlers. Fixed by moving PendSV to the lowest priority via `SCB_SHPR3`.
+- **Context switch crash (Compiler)**: GCC's standard function prologue clobbered the hardware's `EXC_RETURN` token in the `lr` register before my inline assembly could read it. Fixed by rewriting the handler as a pure `asm volatile` block inside an `__attribute__((naked))` function.
 - **Queue corruption**: The queue APIs used weren't ISR-safe, so calling them from an interrupt handler caused race conditions. Fixed by using `xQueueSendFromISR`.
 - **Lost wakeups**: `WFI` and interrupt assertion had a race — if the interrupt fired between the WFI check and the sleep entry, the wake-up was lost. Fixed with PRIMASK critical sections.
 - **SDRAM execute fault**: The MPU didn't have a region configured for the SDRAM execute region. Fixed with `MPU_RASR` allowing execution (`XN=0, EXECUTABLE=1`).

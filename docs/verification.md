@@ -4,7 +4,7 @@ Verification here means "run it in Renode and look at the log output." It's not 
 
 ## Why Renode
 
-We picked Renode because it gives deterministic, shared virtual time simulation. If you need to debug a race condition between the DMA mutating memory and the CPU reading it, you can pause the entire system clock, inspect AXI_SRAM byte-by-byte, and resume. Try doing that with a logic analyzer on a physical NUCLEO board.
+We picked Renode because it gives deterministic, shared virtual time simulation. If you need to debug a race condition between the DMA mutating memory and the CPU reading it—or a 5-instruction critical window like the `wfi` lost-wakeup race—you can pause the entire system clock, inject interrupts at specific cycle boundaries, inspect AXI_SRAM byte-by-byte, and resume. Try doing that with a logic analyzer on a physical NUCLEO board.
 
 The catch: Renode's STM32H7 model isn't complete. The DMAMUX1 peripheral, the CRC hardware block, and some low-power PWR register behaviors are either missing or simplified.
 

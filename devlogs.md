@@ -581,4 +581,21 @@ __asm__ volatile ("dsb\n\t" "isb\n\t"); /* Flush CPU pipeline */
 ```
 By enforcing this memory isolation, we guarantee that the firmware operates deterministically across both the Renode digital twin and the physical Cortex-M7 silicon. The cache coherence policies prevent speculative execution faults, completing the final architectural milestone of the EDP framework.
 
+# Devlog: Version 11 (Final Reliability Hardening)
+
+## What I'm Trying to Do
+Three structural failures emerged during final integration testing, exposing critical boundaries between firmware logic and the physical Cortex-M7 architecture. The goal of this iteration is to rigorously isolate and resolve these edge-cases using the deterministic execution environment provided by the Renode digital twin.
+
+## Attempt 1: Resolving PendSV Priority Inversion
+**The Issue:** The fault vector reported that `PendSV` preempted an active hardware ISR. During initialization, the `SHPR3` register was left untouched, defaulting PendSV to priority 0 (the highest architectural priority). This resulted in the context switcher actively preempting the priority-1 UART interrupt handler.
+**The Fix:** Configured the `SHPR3` register to explicitly write `0xFF` to the PendSV priority byte: `SCB->SHPR3 |= (0xFFUL << 16)`. By enforcing the lowest possible priority for PendSV, the NVIC utilizes hardware tail-chaining to queue context switches, ensuring they only execute after all active hardware ISRs have cleanly returned.
+
+## Attempt 2: Preventing Compiler Register Clobbering in Exception Context
+**The Issue:** Following the priority inversion fix, the context switcher occasionally exhibited memory corruption upon returning from thread mode. Disassembly analysis proved that standard GCC function prologues push the hardware's `EXC_RETURN` token to the stack, but optimizer passes subsequently reuse the `lr` register for local variable calculations. When the inline assembly (`mrs lr, msp`) evaluated the active register, it read an undefined scratch value instead of the exception token.
+**The Fix:** The initial mitigation—tagging the function with `__attribute__((naked))` while retaining C statements—failed at optimization level `-O1` because GCC still emitted stack spill generation to support the C evaluation structures. The definitive resolution was converting the context switch handler entirely into a pure `asm volatile` block within the naked boundary, guaranteeing the compiler maintains zero architectural footprint over the entry and exit register state.
+
+## Attempt 3: Mitigating WFI Lost-Wakeup Race Conditions
+**The Issue:** A classical polling implementation (`while (!packet_ready) { } __WFI();`) encountered intermittent, total system deadlocks. A cycle-accurate trace demonstrated a 5-instruction critical window: if an interrupt physically arrived between the flag evaluation (`cmp`) and the `wfi` instruction retirement, the ISR would execute, service the flag, and clear the pending bit. The CPU would then enter `wfi` with no pending interrupts, resulting in an unrecoverable sleep state.
+**The Fix:** Engineered a protection barrier utilizing `cpsid i` (PRIMASK). Establishing the mask prior to flag evaluation blocks the handler from running, but allows the hardware to assert the NVIC pending bit. Because the ARM architecture explicitly ignores PRIMASK for wakeup-event detection, the `wfi` instruction detects the pending interrupt, acts as a no-op, and allows execution to fall through, preserving deterministic system responsiveness.
+
 
