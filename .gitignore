@@ -26,6 +26,10 @@ EDP_COMPLETE_HANDOFF.md
 devlogs.md
 styles.css
 
+# Thesis and IEEE paper (not needed on GitHub)
+EDP_M7_Thesis_LaTeX_Source/
+IEEE_Paper/
+
 # Third-party templates
 IEEE_Paper/ieee-enhanced-main/
 IEEE_Paper/ieee-template.zip
