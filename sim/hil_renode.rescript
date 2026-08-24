@@ -1,0 +1,15 @@
+# Renode HIL simulation with real MAVLink data
+# Auto-generated stimuli from generate_stimuli.py
+
+mach create "edp-georef-coprocessor"
+machine LoadPlatformDescription @stm32h753.repl
+showAnalyzer sysbus.usart1
+sysbus.usart1 CreateFileBackend @uart_output.log
+sysbus LoadELF @D:\Desktop\edp_firmware.elf
+
+# Let firmware initialize
+emulation RunFor "0.05"
+
+include @generated_stimuli.rescript
+
+quit

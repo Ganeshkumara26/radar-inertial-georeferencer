@@ -1,0 +1,15 @@
+\addvspace {10\p@ }
+\contentsline {figure}{\numberline {1.1}{\ignorespaces The eleven-case study progression this thesis follows. Each stage adds one pipeline capability and exposes exactly one new failure mode (Chapter 4).}}{4}{figure.caption.12}%
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\contentsline {figure}{\numberline {3.1}{\ignorespaces The georeferencing coprocessor pipeline. MAVLink telemetry (100\,Hz) and radar frame-sync (10--50\,Hz) enter from the left; georeferenced WGS84 target coordinates exit to the right.}}{12}{figure.caption.15}%
+\contentsline {figure}{\numberline {3.2}{\ignorespaces System memory map: Flash (code), AXI SRAM (buffers and state), and FMC SDRAM (kinematic history).}}{13}{figure.caption.16}%
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }

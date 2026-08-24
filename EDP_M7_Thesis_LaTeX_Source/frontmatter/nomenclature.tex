@@ -1,0 +1,43 @@
+\frontchapter{List of Abbreviations}
+
+\begin{longtable}{@{}p{3.2cm}p{10.8cm}@{}}
+\toprule
+\textbf{Term} & \textbf{Meaning} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Term} & \textbf{Meaning} \\
+\midrule
+\endhead
+ABI & Application Binary Interface --- compiler-level conventions (struct layout, calling convention) that this project's frame-parsing defects violate assumptions about \\
+API & Application Programming Interface \\
+AXI SRAM & The STM32H7's primary 512\,KB internal SRAM domain, at \texttt{0x24000000} \\
+CFSR & Configurable Fault Status Register --- reports the specific cause of a MemManage/BusFault/UsageFault \\
+CMSIS & Cortex Microcontroller Software Interface Standard --- ARM's vendor-independent hardware abstraction layer \\
+CMSIS-DSP & CMSIS DSP Library --- optimized signal processing functions including matrix operations \\
+CRC & Cyclic Redundancy Check --- here, a 32-bit hardware integrity checksum \\
+DMA & Direct Memory Access --- autonomous memory transfer without CPU intervention \\
+DMAMUX & DMA Request Multiplexer --- STM32H7 peripheral routing peripheral DMA requests to DMA streams; not modelled in the Renode setup used here \\
+DSB / ISB & Data/Instruction Synchronization Barrier --- Arm instructions that force completion of pending memory operations / pipeline flush \\
+EKF & Extended Kalman Filter --- recursive state estimator fusing inertial and radar measurements \\
+ENU & East-North-Up --- local tangent plane coordinate frame used in georeferencing \\
+FMC & Flexible Memory Controller --- STM32H7 peripheral providing the external SDRAM interface \\
+FPU & Floating-Point Unit --- Cortex-M7 hardware floating-point accelerator (FPv5-D16) \\
+GPS & Global Positioning System \\
+HIL & Hardware-in-the-Loop --- verification methodology using real data injected into simulation \\
+L1 Cache & Level 1 cache --- 16\,KB instruction and 16\,KB data cache on the Cortex-M7 \\
+MAVLink & Micro Air Vehicle Link --- communication protocol for unmanned vehicles \\
+MPU & Memory Protection Unit --- configures per-region access/execute permissions \\
+NED & North-East-Down --- aeronautical coordinate frame (Z-axis points down) \\
+NVIC & Nested Vectored Interrupt Controller \\
+.prj/.repl & Renode Platform Description Language file, describing a simulated SoC's peripherals and memory map \\
+.rescript / RESC & Renode monitor script file, sequencing simulation commands \\
+SDRAM & Synchronous Dynamic RAM --- external memory reached via the FMC \\
+SPI & Serial Peripheral Interface --- synchronous serial communication for output streaming \\
+SCB & System Control Block --- Arm Cortex-M configuration registers at \texttt{0xE000ED00} \\
+USART & Universal Synchronous/Asynchronous Receiver/Transmitter --- serial communication peripheral \\
+WFI & Wait For Interrupt --- Arm instruction that suspends the core in a low-power state until an interrupt is pending \\
+WGS84 & World Geodetic System 1984 --- standard GPS coordinate system \\
+XN & Execute-Never --- an MPU/architecture attribute marking a memory region as non-executable \\
+\bottomrule
+\end{longtable}

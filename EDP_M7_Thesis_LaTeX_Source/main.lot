@@ -1,0 +1,22 @@
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {3.1}{\ignorespaces Functional and non-functional requirements driving the georeferencing coprocessor design.}}{11}{table.caption.13}%
+\contentsline {table}{\numberline {3.2}{\ignorespaces STM32H753 peripherals used by the georeferencing coprocessor.}}{11}{table.caption.14}%
+\contentsline {table}{\numberline {3.3}{\ignorespaces Development and verification toolchain.}}{14}{table.caption.17}%
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {5.1}{\ignorespaces Consolidated taxonomy of the eleven defects reproduced in Chapter~4.}}{21}{table.caption.18}%
+\contentsline {table}{\numberline {5.2}{\ignorespaces Renode verification evidence per pipeline stage.}}{22}{table.caption.19}%
+\contentsline {table}{\numberline {5.3}{\ignorespaces Renode versus physical silicon: documented divergences and firmware workarounds.}}{24}{table.caption.20}%
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {A.1}{\ignorespaces Source files and their pipeline roles.}}{31}{table.caption.24}%
+\contentsline {table}{\numberline {A.2}{\ignorespaces Memory regions defined in \texttt {stm32h753.ld}.}}{32}{table.caption.25}%
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {D.1}{\ignorespaces AXI SRAM backdoor addresses used for HIL testing.}}{37}{table.caption.26}%
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {E.1}{\ignorespaces All defects reproduced, root-caused, and corrected.}}{39}{table.caption.27}%
+\addvspace {10\p@ }

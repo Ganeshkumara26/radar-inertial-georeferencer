@@ -1,0 +1,32 @@
+\section{Pipeline Foundation, MAVLink Ingestion, and Timestamps}
+\label{sec:cs01-03}
+
+The first three case studies establish the execution environment and the two real-time input paths: MAVLink telemetry from the flight controller and frame-sync timestamps from the radar SoC.
+
+\subsection{CS01 --- Pipeline Foundation and Bare-Metal Boot}
+
+The build system initially failed with \texttt{No rule to make target 'build/main.o'} because GNU Make's \texttt{patsubst} does not expand nested variables in pattern rules containing directory traversals. The fix uses explicit per-file rules.
+
+Compilation revealed two IRQn suffix typos (\texttt{DMA1\_STREAM0\_IRQN} $\rightarrow$ \texttt{DMA1\_STREAM0\_IRQn}) and linker errors for \texttt{memcpy}, \texttt{memset}, \texttt{\_\_aeabi\_l2d}, and \texttt{\_\_errno}. The fix adds \texttt{-lc -lnosys -lgcc} to the linker flags and a minimal \texttt{syscalls.c} providing \texttt{\_\_errno}.
+
+The \texttt{Reset\_Handler} enables the Cortex-M7 FPU by setting CPACR bits [23:20]. Without this, the first floating-point store triggers a UsageFault. This is a silicon requirement that Renode does not enforce.
+
+\subsection{CS02 --- Zero-Copy MAVLink DMA Parser}
+
+DMA1 Stream 0 is configured in circular mode to move USART1 RX bytes into a 512-byte AXI SRAM buffer. The parser polls the DMA remaining-count register to detect new data.
+
+\textbf{Cache coherency:} The Cortex-M7 L1 data cache creates a silent failure mode where the CPU reads stale data after DMA writes. The fix invalidates cache lines via \texttt{SCB\_DCCIMVAC} before reading the buffer. This is silicon-correct defensive code that Renode (having no cache model) does not require.
+
+\textbf{Struct packing:} GCC inserts 2 bytes of padding before the first \texttt{float} field in the MAVLink attitude struct, shifting all payload data. The fix uses \texttt{\_\_attribute\_\_((packed))}.
+
+\textbf{CRC endianness:} The STM32 hardware CRC peripheral processes words MSB-first; the CPU writes LSB-first. The fix enables \texttt{CRC\_CR\_REV\_IN} for byte-order correction.
+
+\subsection{CS03 --- Hardware Timer Synchronization}
+
+TIM2 (32-bit) free-runs at 1\,MHz for microsecond-precision frame-sync timestamping.
+
+\textbf{Prescaler shadow load:} Writing \texttt{TIM2\_PSC = 239} updates the shadow register only; the timer does not count until an explicit update event (\texttt{TIM2\_EGR = TIM\_EGR\_UG}) loads it.
+
+\textbf{Priority inversion:} The frame-sync EXTI ISR was initially configured at higher priority than TIM2, causing it to read a stale \texttt{TIM2\_CCR1} value before the capture completed. The fix uses hardware input capture (TI1 mapped to Channel 1) so the latch is atomic, and the ISR only reads the already-captured value.
+
+Complete narrative: \texttt{docs/engineering-notebook/001-pipeline-foundation.md} through \texttt{003-hw-timer-sync.md}.

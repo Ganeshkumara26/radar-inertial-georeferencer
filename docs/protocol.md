@@ -1,76 +1,113 @@
 # Protocol
 
-The telemetry protocol is a simplified MAVLink v1/v2-inspired binary packet format. Nothing too fancy — just enough to exercise the parser and stress-test the edge cases.
+## MAVLink Input (from Pixhawk)
 
-## Packet Structure
+The coprocessor ingests three MAVLink v2 message types from the flight controller:
+
+| Message | ID | Rate | Purpose |
+|---------|----|------|---------|
+| `ATTITUDE` | 30 | 100 Hz | Roll, pitch, yaw + angular rates |
+| `LOCAL_POSITION_NED` | 32 | 50 Hz | Position + velocity in NED frame |
+| `GLOBAL_POSITION_INT` | 33 | 10 Hz | WGS84 lat/lon/alt for georeferencing |
+
+### MAVLink v2 Packet Structure
 
 ```mermaid
 flowchart LR
-    subgraph Packet["MAVLink-style Telemetry Packet"]
-        MAGIC["Magic: 0xFE<br/>(1 byte)"]
+    subgraph Packet["MAVLink v2 Packet"]
+        MAGIC["Magic: 0xFD<br/>(1 byte)"]
         LENGTH["Length: N<br/>(1 byte)"]
+        INCOMPAT["Incompat Flags<br/>(1 byte)"]
+        COMPAT["Compat Flags<br/>(1 byte)"]
         SEQ["Sequence<br/>(1 byte)"]
         SYSID["System ID<br/>(1 byte)"]
         COMPID["Component ID<br/>(1 byte)"]
-        MSGID["Message ID<br/>(1 byte)"]
-        PAYLOAD["Payload: N bytes<br/>(roll, pitch, yaw floats)"]
-        CRC16["CRC-16 CCITT<br/>(2 bytes)"]
+        MSGID["Message ID<br/>(3 bytes)"]
+        PAYLOAD["Payload: N bytes<br/>(packed structs)"]
+        CRC["CRC-16<br/>(2 bytes)"]
     end
-    MAGIC --> LENGTH --> SEQ --> SYSID --> COMPID --> MSGID --> PAYLOAD --> CRC16
+    MAGIC --> LENGTH --> INCOMPAT --> COMPAT --> SEQ --> SYSID --> COMPID --> MSGID --> PAYLOAD --> CRC
+```
 
-    style MAGIC fill:#e3f2fd
-    style LENGTH fill:#e3f2fd
-    style SEQ fill:#e8f5e7
-    style SYSID fill:#e8f5e7
-    style COMPID fill:#e8f5e7
-    style MSGID fill:#fce4ec
-    style PAYLOAD fill:#fff3e0
-    style CRC16 fill:#ffebee
+### Data Flow Through Pipeline
+
+```mermaid
+sequenceDiagram
+    participant FC as Pixhawk (MAVLink)
+    participant DMA as DMA1 Stream 0
+    participant P as MAVLink Parser
+    participant RB as Ring Buffer
+    participant E as EKF
+    participant G as Geo Transform
+    participant O as Output Stream
+    participant L as Laptop
+
+    FC->>DMA: UART byte stream (DMA, zero CPU)
+    DMA->>P: 512-byte circular buffer
+    P->>P: Parse, CRC check, NaN reject
+    P->>RB: kinematic_state_t (timestamped)
+    RB->>E: State window
+    E->>E: Predict + Update (CMSIS-DSP)
+    E->>G: Fused position/velocity
+    G->>G: Polar→ENU→WGS84
+    G->>O: target_wgs84_t
+    O->>O: Pack binary frame + CRC-32
+    O->>L: SPI DMA / USART
+```
+
+## Binary Output Frame (to Ground Laptop)
+
+```mermaid
+flowchart LR
+    subgraph Frame["Georeferenced Target Frame"]
+        HDR["Header (14 bytes)<br/>Magic, Ver, Len, Seq, TS, Count, Status"]
+        T0["Target 0 (32 bytes)<br/>lat, lon, alt, vel, snr, ts"]
+        T1["Target 1 (32 bytes)<br/>..."]
+        TN["Target N (32 bytes)<br/>..."]
+        CRC32["CRC-32 (4 bytes)"]
+    end
+    HDR --> T0 --> T1 --> TN --> CRC32
+```
+
+### Output Header Structure
+
+```c
+typedef struct __attribute__((packed)) {
+    uint8_t  magic;          // 0xED
+    uint8_t  version;        // 0x01
+    uint16_t length;         // Total frame length
+    uint32_t sequence;       // Monotonic frame counter
+    uint32_t timestamp_us;   // Frame creation time (us)
+    uint8_t  target_count;   // Number of targets
+    uint8_t  status;         // System status flags
+} output_header_t;  // 14 bytes
+```
+
+### Per-Target Record
+
+```c
+typedef struct __attribute__((packed)) {
+    double   latitude;       // WGS84 degrees
+    double   longitude;      // WGS84 degrees
+    float    altitude;       // meters above MSL
+    float    vel_east;       // m/s
+    float    vel_north;      // m/s
+    float    vel_up;         // m/s
+    float    snr;            // dB
+    uint32_t timestamp_us;   // Detection timestamp
+} output_target_record_t;  // 32 bytes
 ```
 
 ## Key Design Decisions
 
 ### Struct Packing
+All structs use `__attribute__((packed))` to prevent GCC padding. The 6-byte MAVLink header followed by float fields would cause 2 bytes of invisible padding without it.
 
-```mermaid
-flowchart TD
-    subgraph Unpacked["Without __attribute__((packed))"]
-        U1["Header: 6 bytes"] --> U2["Padding: 2 bytes"] --> U3["Payload: 12 bytes (3 floats)"]
-        U4["Problem: 2 extra bytes<br/>Wire doesn't match struct layout"]
-    end
+### CRC-32 for Output Integrity
+The output frame uses CRC-32 (STM32 hardware peripheral) over the entire frame including header and all target records. The ground station validates the CRC before displaying targets.
 
-    subgraph Packed["With __attribute__((packed))"]
-        P1["Header: 6 bytes"] --> P2["Payload: 12 bytes (3 floats)"] --> P3["Total: 18 bytes"]
-        P4["Match: struct == wire bytes"]
-    end
+### Timestamp Interpolation
+Since MAVLink attitude (100 Hz) and radar frame-sync (50 Hz) are asynchronous, the EKF interpolates attitude to the exact radar timestamp using the ring buffer's kinematic history. This reduces attitude age from 10 ms to <1 ms.
 
-    style Unpacked fill:#ffebee,color:#000
-    style Packed fill:#e8f5e7,color:#000
-```
-
-The ARM Cortex-M7 is 32-bit and GCC naturally aligns `float` fields to 4-byte boundaries. Our 6-byte header means the compiler injects 2 bytes of invisible padding before the first `float`. We fixed this with `__attribute__((packed))` in v2.
-
-### Data Flow
-
-```mermaid
-sequenceDiagram
-    participant W as Wire (UART RX)
-    participant ISR as USART ISR
-    participant R as Ring Buffer
-    participant P as Parser State Machine
-    participant S as Struct
-    participant C as CRC Check
-
-    W->>ISR: Byte received (interrupt)
-    ISR->>R: Push byte into ring buffer
-    R->>P: Parser pulls bytes
-    P->>P: Parse header byte-by-byte
-    P->>S: Copy payload into packed struct
-    S->>C: CRC-16 over header+payload
-    C->>C: Compare against received CRC
-    C->>P: Match = valid packet
-```
-
-### Endianness Collision (v4)
-
-The Cortex-M7 is little-endian, but the hardware CRC peripheral processes words MSB-first. Without `REV_IN`, a 32-bit write of `0x34333231` feeds the wrong byte order into the CRC engine, producing wrong checksums. The fix was enabling `USART_CR1_RE` ... no, actually enabling `CRC_CR_REV_IN` in the CRC peripheral config register.
+### DMA for Zero-Copy
+Both input (USART1 RX) and output (SPI TX) use DMA to minimize CPU involvement. The CPU only runs the EKF and coordinate transform — the data movement is entirely peripheral-driven.

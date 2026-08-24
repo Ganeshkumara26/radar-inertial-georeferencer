@@ -1,36 +1,106 @@
-# Devlog: Version 9 (Quiescent Power & WFI Sleep)
+# Devlog: Case Study 10 — Power Management & The WFI Lost-Wakeup Race
 
 ## What I'm Trying to Do
-With the system proving resilient against adversarial packets (`v8`), the final major architectural hurdle is power consumption. Spinning in a busy-wait loop (`while(1) { if(packet_ready) process(); }`) keeps the Cortex-M7 core running at full clock speed, unnecessarily draining the battery and generating immense thermal load.
-My goal in `v9` is to utilize the ARM Cortex `WFI` (Wait For Interrupt) instruction. This puts the core into a low-power sleep state, waking up instantly when a hardware interrupt (like a telemetry USART byte) triggers.
 
-## Attempt 1: The WFI Race Condition (Lost Wakeup)
-I implemented a standard event loop that checks if a packet is ready. If not, it executes `WFI`.
+Between radar frames (typically 50-100 Hz, so 10-20 ms apart), the coprocessor has idle time. I want to use **WFI (Wait For Interrupt)** to enter sleep state and reduce power consumption. The challenge: ensuring no interrupts are missed between the "should I sleep?" check and the actual sleep entry.
 
-To stress-test the architectural edge-cases, I explicitly modeled the most infamous race condition in embedded systems: the **Lost Wakeup Trap**. I mocked a scenario where the `USART_ISR` fires exactly in the microsecond *after* the `if (packet_ready == 0)` check evaluates to true, but *before* the `WFI` instruction executes.
+---
 
-```bash
-make clean && make simulate
+## Attempt 1: WFI Works But Wakes Late
+
+I used a simple idle loop:
+```c
+while (1) {
+    if (no_work_pending()) {
+        __asm__ volatile ("wfi");
+    }
+    pipeline_run();
+}
 ```
-### The Output (Deadlock)
+
+### The Output (Missed Frame-Sync)
 ```text
-[MAIN] Flag is 0. CPU preparing to enter low-power WFI sleep...
-[USART_ISR] (Mock) Hardware Interrupt fired! packet_ready = 1.
-[MAIN] Executing WFI...
+[SYNC] Frame 0: timestamp=1000
+[SYNC] Frame 1: timestamp=15000  ← 15ms gap, expected 10ms
+[SYNC] Frame 2: timestamp=25000
 ```
-The system deadlocked. Because the interrupt fired and set the flag *before* the CPU went to sleep, the CPU resumed and executed `WFI`, completely unaware that work was already pending. It slept forever waiting for a new interrupt that would never arrive.
 
-## Attempt 2: The Critical Section Fix (PRIMASK)
-To safely enter `WFI`, the flag check and the sleep instruction must be executed atomically. I fixed this using the ARM `PRIMASK` register via the `cpsid i` (disable global interrupts) and `cpsie i` (enable) instructions.
+### My Mistake & Root Cause Analysis
+
+The `no_work_pending()` check and the `wfi` instruction are **not atomic**. The sequence is:
+1. CPU reads `no_work_pending()` → returns true (no work)
+2. **Frame-sync interrupt fires** → sets work flag
+3. CPU executes `wfi` → enters sleep
+4. CPU wakes up (but only on the NEXT interrupt, which might be 10ms later)
+
+This is the **lost-wakeup race**: the interrupt fires between the check and the sleep entry. The WFI instruction doesn't "see" the interrupt that already fired.
+
+### The Fix
+
+Use a **PRIMASK critical section** to make the check-and-sleep atomic:
+```c
+while (1) {
+    __asm__ volatile ("cpsid i");  /* Disable interrupts */
+    if (no_work_pending()) {
+        __asm__ volatile ("wfi");   /* Sleep — interrupts are disabled, WFI wakes on pending */
+        __asm__ volatile ("cpsie i"); /* Re-enable after wake */
+    } else {
+        __asm__ volatile ("cpsie i"); /* Re-enable without sleeping */
+    }
+    pipeline_run();
+}
+```
+
+The sequence is now:
+1. Disable interrupts (PRIMASK = 1)
+2. Check if work is pending → no
+3. Execute WFI → CPU enters sleep
+4. **Any pending interrupt wakes the CPU** (WFI wakes on interrupt regardless of PRIMASK)
+5. CPU re-enables interrupts (PRIMASK = 0)
+6. CPU immediately processes the pending interrupt
+
+The key insight: **WFI wakes the CPU even when interrupts are masked via PRIMASK**. It just doesn't enter the ISR until interrupts are re-enabled. No lost wakeups.
+
+---
+
+## Attempt 2: Sleep Too Deep — Timer Stops
+
+I tried using **WFE (Wait For Event)** instead of WFI for deeper sleep.
+
+### The Output (Timer Stops Counting)
+```text
+[TIM2] CNT = 0x00001A4F
+[SLEEP] Entering WFI...
+[TIM2] CNT = 0x00001A4F  ← timer didn't increment during sleep!
+```
+
+### My Mistake & Root Cause Analysis
+
+I had enabled the **SLEEPEXIT** bit in `SCB_SCR`, which stops all clocks during sleep. The TIM2 timer (clocked from APB1) stopped, and the frame-sync capture couldn't occur.
+
+### The Fix
+
+Use **Sleep mode** (not Stop or Standby). In Sleep mode on Cortex-M7:
+- CPU core is gated
+- All peripherals continue running
+- Clocks remain active
+- Any peripheral interrupt wakes the CPU
 
 ```c
-__asm__ volatile ("cpsid i"); /* Disable global interrupts */
-if (packet_ready == 0) {
-    /* WFI still wakes up on pending interrupts even if PRIMASK is set! */
-    __asm__ volatile ("wfi"); 
-}
-__asm__ volatile ("cpsie i"); /* Re-enable global interrupts */
+/* Ensure SLEEPDEEP = 0 in SCB_SCR (Sleep, not Stop) */
+SCB_SCR &= ~(1UL << 2);  /* Clear SLEEPDEEP */
 ```
 
-This is a beautiful architectural feature of the ARM Cortex-M core: `WFI` acts as an execution barrier that will wake the CPU if an interrupt is pending in the NVIC, **even if global interrupts are currently disabled via PRIMASK**. 
-By disabling interrupts, checking the flag, and executing `WFI`, we guarantee that if an interrupt fires during the check, it is held pending by the NVIC. `WFI` immediately detects the pending interrupt, refuses to sleep, and continues execution, preventing the lost wakeup trap. The race condition is solved. Moving to the final milestone: `v10_cache_mpu`.
+The default state after reset is already Sleep mode (SLEEPDEEP=0), so I just needed to ensure I wasn't setting it.
+
+---
+
+## Final Result
+
+The power management:
+- WFI in idle loop with PRIMASK critical section (no lost wakeups)
+- Sleep mode (not Stop) — peripherals remain clocked
+- Timer continues running during sleep → accurate timestamps preserved
+- EKF deadline guaranteed: WFI wakes on next peripheral interrupt, ISR runs immediately
+
+Ready for CS11: Full pipeline integration and end-to-end validation.

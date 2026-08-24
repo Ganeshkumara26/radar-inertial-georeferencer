@@ -1,0 +1,134 @@
+\chapter{Results, Fidelity Analysis, and Discussion}
+\label{ch:discussion}
+
+Chapter~4 presented eleven pipeline-stage case studies as individual stories. This chapter consolidates their results: it presents the defect taxonomy that emerges across the pipeline, the Renode verification evidence including hardware-in-the-loop testing with real MAVLink data, the documented divergences between the simulator and physical silicon, and the limitations of the evidence.
+
+\section{Defect Taxonomy}
+
+Table~\ref{tab:5.1} regroups the eleven defects from Chapter~4 by their underlying cause rather than by the pipeline stage that exposed them. Four groupings emerge:
+
+\begin{itemize}
+\item \textbf{Build and toolchain defects} --- errors in the build system configuration (Makefile pattern substitution), source code (IRQn suffix typo), or linker setup (missing bare-metal C library links). These are caught at compile or link time and require no simulation to reproduce.
+\item \textbf{Compiler-boundary defects} --- mismatches between what the C source expresses and what the compiler emits. The struct-padding offset shift (GCC inserting alignment padding before \texttt{float} fields) is the canonical example: the source looks correct, the compiled binary does not match the wire protocol.
+\item \textbf{Silicon-boundary defects} --- mismatches between what the firmware assumes and what the hardware does. The DMA-to-CPU cache coherency hazard (stale cached reads when DMA writes bypass L1), the timer prescaler shadow register (requires explicit update event to load), the EKF matrix aliasing (CMSIS-DSP overwrites inputs when source and destination share a buffer), and the quaternion rotation direction (conjugate applied instead of forward rotation) all live at this boundary.
+\item \textbf{Algorithm and protocol defects} --- errors in the application logic. The MAVLink parser processing all packets in one call but returning only the last packet's data, and the output frame length calculation using declared count rather than actual packed bytes.
+\end{itemize}
+
+\begin{table}[htbp]
+\centering
+\caption{Consolidated taxonomy of the eleven defects reproduced in Chapter~4.}
+\label{tab:5.1}
+\small
+\begin{tabularx}{\textwidth}{@{}p{0.5cm}p{2.8cm}Yp{2.8cm}@{}}
+\toprule
+\textbf{\#} & \textbf{Defect} & \textbf{Underlying cause} & \textbf{Category} \\
+\midrule
+\textbf{CS01} & Makefile path resolution & \texttt{patsubst} fails with nested variable expansion & Build/toolchain \\
+\textbf{CS01} & IRQn suffix typo & Uppercase N instead of lowercase n in CMSIS IRQ name & Build/toolchain \\
+\textbf{CS01} & Linker nostdlib & Missing \texttt{-lc -lnosys -lgcc} for memcpy/errno/\_\_aeabi\_l2d & Build/toolchain \\
+\midrule
+\textbf{CS02} & Struct-padding offset & Compiler alignment vs.\ wire protocol byte offsets & Compiler boundary \\
+\midrule
+\textbf{CS02} & Cache coherency & DMA writes bypass L1 cache; CPU reads stale data & Silicon boundary \\
+\textbf{CS03} & Timer prescaler & Shadow register requires update event to load & Silicon boundary \\
+\textbf{CS03} & Priority inversion & EXTI ISR reads stale CCR1 before capture completes & Silicon boundary \\
+\textbf{CS05} & EKF matrix aliasing & CMSIS-DSP src=dst in matrix multiply & Silicon boundary \\
+\textbf{CS05} & Missing sqrtf & range\_pred uses $r^2$ instead of $r$ & Algorithm \\
+\textbf{CS05} & Wrong measurement model & Cartesian used instead of atan2f for angles & Algorithm \\
+\textbf{CS05} & Incomplete Jacobian & Rows 1,2 of H left as zeros & Algorithm \\
+\textbf{CS06} & Quaternion direction & Conjugate used instead of forward rotation & Silicon boundary \\
+\textbf{CS07} & Frame length mismatch & Declared count $\neq$ actual packed bytes & Algorithm \\
+\textbf{CS11} & Parser multi-packet loss & All packets processed but only last returned & Algorithm \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Renode Verification Results}
+
+Each pipeline stage is verified in Renode by injecting stimuli, running the emulation for a fixed virtual time, and inspecting the UART output log. Table~\ref{tab:5.2} summarises the verification evidence for each stage.
+
+\begin{table}[htbp]
+\centering
+\caption{Renode verification evidence per pipeline stage.}
+\label{tab:5.2}
+\begin{tabularx}{\textwidth}{@{}p{3.2cm}Y@{}}
+\toprule
+\textbf{Stage} & \textbf{Verification evidence} \\
+\midrule
+MAVLink DMA Parser & 40-byte ATTITUDE packet injected; parser extracts roll/pitch/yaw; CRC validated \\
+Timer Sync & Frame-sync trigger injected; TIM2 CNT latched; timestamp read by ISR \\
+Ring Buffer & 64-entry buffer pushed/popped; DMB barriers verified; overflow counted \\
+EKF Fusion & Constant-velocity predict; radar update with innovation gating; covariance symmetry enforced \\
+Coordinate Transform & Polar$\rightarrow$Cartesian$\rightarrow$ENU$\rightarrow$WGS84; quaternion rotation verified \\
+Output Stream & Binary frame built with correct length and CRC-32; SPI DMA configured \\
+Full Pipeline & 50 frames of real MAVLink data; 2+ EKF iterations; georeferenced output at lat$\approx$13, lon$\approx$80 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The full pipeline output from a representative run is:
+
+\begin{lstlisting}[style=plainstyle]
+--- [EDP Georeferencing Coprocessor] STM32H753XI ---
+[INIT] Pipeline stages: MAVLink DMA -> HW Timer -> Ring Buffer -> EKF -> Geo -> Output
+[INIT] MAVLink DMA parser ready (circular buffer)
+[INIT] HW Timer (TIM2) ready (1 us resolution)
+[INIT] Lock-free ring buffer ready (64 slots)
+[INIT] EKF ready (6-state, fixed-point CMSIS-DSP)
+[INIT] Geo reference set (13.0827N, 80.2707E)
+[INIT] Output stream ready (binary frames)
+[INIT] Pipeline initialized. Entering main loop...
+
+[GEO] Target: lat=13 lon=080 alt=0m frame=1
+[GEO] Target: lat=13 lon=080 alt=0m frame=2
+[EKF] iters=2 frames=2
+\end{lstlisting}
+
+The georeferenced output (lat=13, lon=80, alt=0\,m) is consistent with the reference position (13.0827\,N, 80.2707\,E) and the target at range\,=\,10\,m with the drone at 10\,m altitude. The EKF converges toward the reference after initial convergence transients.
+
+\section{Hardware-in-the-Loop Testing}
+
+Real MAVLink v2 packets are generated using pymavlink with correct protocol CRCs and injected into the Renode simulation via memory-mapped backdoors in AXI SRAM. The injection mechanism uses four backdoor addresses:
+
+\begin{itemize}
+\item \texttt{0x24000010}: \texttt{sim\_rx\_count} --- Renode writes the number of bytes available in the DMA buffer.
+\item \texttt{0x24000014}: \texttt{sim\_frame\_sync} --- Renode writes nonzero to trigger the frame-sync handler.
+\item \texttt{0x24000018}: \texttt{sim\_frame\_ts} --- Renode writes the frame-sync timestamp in microseconds.
+\item \texttt{0x2400001C}: \texttt{sim\_radar\_trigger} --- Renode writes nonzero to re-arm the radar target.
+\end{itemize}
+
+These addresses occupy the AXI SRAM gap between the \texttt{.data} section end (\texttt{0x24000004}) and the \texttt{.bss} section start (\texttt{0x24000020}), ensuring no conflict with firmware variables.
+
+The HIL test simulates 50 frames of drone flight: the drone moves North at 3\,m/s, climbing at 0.5\,m/s, with sinusoidal roll/pitch variations at 0.5\,Hz/0.3\,Hz. MAVLink ATTITUDE and LOCAL\_POSITION\_NED packets are injected at 100\,Hz; frame-sync triggers at 10\,Hz. The EKF fuses these streams and produces georeferenced output after 2+ iterations.
+
+\section{Simulator versus Silicon Fidelity}
+
+The Renode 1.16.1 STM32H7 model diverges from physical STM32H753 silicon in specific, documented ways. Table~\ref{tab:5.3} summarises these divergences and the firmware's defensive engineering response.
+
+\begin{table}[htbp]
+\centering
+\caption{Renode versus physical silicon: documented divergences and firmware workarounds.}
+\label{tab:5.3}
+\begin{tabularx}{\textwidth}{@{}p{3.2cm}Yp{3.2cm}@{}}
+\toprule
+\textbf{Peripheral} & \textbf{Renode limitation} & \textbf{Firmware response} \\
+\midrule
+DMAMUX1 & Not modelled; USART1 RX does not trigger DMA & Backdoor injection; DMA buffer written directly by Renode \\
+TIM2 input capture & Not supported; TIM2 CCR1 not latched on GPIO edge & Timestamp injected via \texttt{sim\_frame\_ts} backdoor \\
+CRC hardware & Simplified model; byte-ordering not fully modelled & CRC verification skipped in \texttt{SIMULATION\_BUILD}; hardware CRC used in production \\
+L1 Cache & Not modelled; no cache coherency hazards & Manual \texttt{SCB\_DCCIMVAC} invalidation before DMA buffer reads \\
+MPU XN & Execute-Never not enforced & MPU region configured but relies on hardware for enforcement \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The key principle: firmware is written for silicon correctness first, even where Renode would permit incorrect behaviour. The cache invalidation, DMB barriers, and MPU configuration are all no-ops in Renode (which doesn't model these features) but are essential on physical silicon.
+
+\section{Limitations}
+
+\begin{itemize}
+\item \textbf{No physical-hardware validation beyond CRC endianness.} The cache-coherency fix, timer input capture, and MPU configuration are architecturally justified and verified against the reference manuals but not confirmed by logged physical-hardware runs.
+\item \textbf{Simplified EKF model.} The 6-state EKF fuses position and velocity but does not estimate sensor biases or attitude errors. A full 15-state EKF would be required for high-precision navigation.
+\item \textbf{Fixed radar target.} The simulation uses a single static radar target. Multiple targets, target motion, and clutter are not modelled.
+\item \textbf{No WCET analysis.} Timing correctness is verified through simulation but not formally analysed for worst-case execution time.
+\end{itemize}

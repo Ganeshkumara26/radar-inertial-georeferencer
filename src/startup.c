@@ -86,6 +86,11 @@ const void* g_pfnVectors[] = {
 };
 
 void Reset_Handler(void) {
+    /* Enable FPU CP10 and CP11 (Cortex-M7) */
+    *(volatile uint32_t *)0xE000ED88 |= (0xFUL << 20);
+    __asm__ volatile ("dsb");
+    __asm__ volatile ("isb");
+
     uint32_t *pSrc = &_etext;
     uint32_t *pDest = &_sdata;
 

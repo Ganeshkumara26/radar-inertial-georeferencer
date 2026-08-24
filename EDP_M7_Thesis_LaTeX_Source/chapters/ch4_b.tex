@@ -1,0 +1,36 @@
+\section{Inertial Fusion and Coordinate Transformation}
+\label{sec:cs04-06}
+
+Case studies 4--6 form the computational core of the coprocessor: buffering kinematic state, fusing it through an EKF, and transforming coordinates from the radar frame to global WGS84.
+
+\subsection{CS04 --- Lock-Free Ring Buffer}
+
+A single-producer (parser) / single-consumer (EKF) ring buffer in AXI SRAM passes timestamped kinematic state between pipeline stages.
+
+\textbf{Memory barrier:} The Cortex-M7 out-of-order pipeline with its write buffer means the index update (\texttt{head++}) can complete before the data write reaches SRAM. A \texttt{DMB} barrier between the data write and index update ensures ordering.
+
+\textbf{Full/empty ambiguity:} With power-of-2 sizes, \texttt{head == tail} is ambiguous. The fix sacrifices one slot: the buffer holds $N-1$ entries with unambiguous full detection via \texttt{(head+1) \& MASK == tail}.
+
+\subsection{CS05 --- Fixed-Point Extended Kalman Filter}
+
+A 6-state EKF ($[p_n, p_e, p_d, v_n, v_e, v_d]^T$) fuses inertial state with radar range-azimuth-elevation-doppler measurements using CMSIS-DSP matrix operations.
+
+\textbf{Matrix aliasing:} All intermediate matrices (\texttt{tmp6x6}, \texttt{tmp4x6}, etc.) initially shared a single buffer, causing \texttt{arm\_mat\_mult\_f32} to overwrite its own inputs. The fix allocates distinct scratchpads for every intermediate.
+
+\textbf{Missing sqrtf:} The range prediction used $r^2$ instead of $\sqrt{r^2}$. Corrected with \texttt{sqrtf()}.
+
+\textbf{Wrong measurement model:} Azimuth and elevation predictions used raw position coordinates (meters) instead of \texttt{atan2f()}. Corrected with proper trigonometric functions.
+
+\textbf{Incomplete Jacobian:} Rows 1 and 2 of the $4\times6$ measurement Jacobian $H$ were left zero, preventing angle measurements from updating the state. Correctly populated with partial derivatives of \texttt{atan2f} and \texttt{asin}.
+
+\textbf{Covariance symmetry:} The Joseph form update loses symmetry in single-precision. Fixed by averaging $P_{ij}$ and $P_{ji}$ after each update.
+
+\subsection{CS06 --- Quaternion-Based Coordinate Transform}
+
+Converts radar polar coordinates to global WGS84 via: polar$\rightarrow$Cartesian$\rightarrow$body frame (quaternion rotation)$\rightarrow$ENU$\rightarrow$WGS84.
+
+\textbf{Quaternion direction:} The rotation used the conjugate of the attitude quaternion, rotating targets in the opposite direction. Corrected to use the forward quaternion.
+
+\textbf{Precision near equator:} Single-precision \texttt{sin(lat)} loses precision for small latitudes. The ENU-to-WGS84 conversion uses \texttt{double} for the reference position calculation.
+
+Complete narrative: \texttt{docs/engineering-notebook/004-lockfree-ringbuffer.md} through \texttt{006-geo-transform.md}.

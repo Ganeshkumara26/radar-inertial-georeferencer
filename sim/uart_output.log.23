@@ -1,0 +1,12 @@
+
+--- [EDP Georeferencing Coprocessor] STM32H753XI ---
+[INIT] Pipeline stages: MAVLink DMA → HW Timer → Ring Buffer → EKF → Geo → Output
+[INIT] MAVLink DMA parser ready (circular buffer)
+[INIT] HW Timer (TIM2) ready (1 us resolution)
+[INIT] Lock-free ring buffer ready (64 slots)
+[INIT] EKF ready (6-state, fixed-point CMSIS-DSP)
+[INIT] Geo reference set (13.0827N, 80.2707E)
+[INIT] Output stream ready (binary frames)
+[INIT] Pipeline initialized. Entering main loop...
+
+[GEO] Target: lat=13 lon=080 alt=0/m frame=1

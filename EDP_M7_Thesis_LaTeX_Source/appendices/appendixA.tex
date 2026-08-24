@@ -1,0 +1,70 @@
+\chapter{Source Code Structure and Build System}
+\label{app:A}
+
+This appendix summarises the source code structure and build system for the georeferencing coprocessor firmware. Complete source files are available in the \texttt{src/} directory of the project repository.
+
+\section{Source File Overview}
+
+\begin{table}[htbp]
+\centering
+\caption{Source files and their pipeline roles.}
+\label{tab:A:files}
+\begin{tabularx}{\textwidth}{@{}p{4.5cm}Y@{}}
+\toprule
+\textbf{File} & \textbf{Role} \\
+\midrule
+\texttt{src/main.c} & Pipeline integration and main loop \\
+\texttt{src/startup.c} & Vector table, Reset\_Handler (FPU enable, data copy, BSS zero), Default\_Handler \\
+\texttt{src/syscalls.c} & Minimal \texttt{\_\_errno} stub for libm newlib-nano \\
+\texttt{src/mavlink\_parser.c/h} & Zero-copy DMA MAVLink v2 parser with cache coherency maintenance \\
+\texttt{src/hw\_timer.c/h} & TIM2 32-bit microsecond timer with input capture \\
+\texttt{src/ring\_buffer.c/h} & Lock-free SPSC ring buffer with DMB barriers \\
+\texttt{src/ekf.c/h} & 6-state Extended Kalman Filter with CMSIS-DSP matrices \\
+\texttt{src/geo\_transform.c/h} & Polar$\rightarrow$ENU$\rightarrow$WGS84 coordinate transforms \\
+\texttt{src/output\_stream.c/h} & Binary frame output over SPI DMA \\
+\texttt{src/stm32h753.ld} & Linker script: Flash, AXI SRAM, SDRAM memory regions \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Build Commands}
+
+\begin{lstlisting}[style=plainstyle]
+# Clean build
+make -f scripts/Makefile clean && make -f scripts/Makefile all
+
+# Show memory usage
+make -f scripts/Makefile size
+
+# Generate disassembly
+make -f scripts/Makefile disasm
+
+# Run Renode simulation
+make -f scripts/Makefile simulate
+\end{lstlisting}
+
+\section{Key Build Flags}
+
+\begin{itemize}
+\item \texttt{-mcpu=cortex-m7 -mthumb -mfloat-abi=hard -mfpu=fpv5-d16}: Cortex-M7 with hardware FPU
+\item \texttt{-DSIMULATION\_BUILD}: Enables simulation backdoors (Renode only)
+\item \texttt{-ffunction-sections -fdata-sections -Wl,--gc-sections}: Dead code elimination
+\item \texttt{--specs=nosys.specs -nostdlib -lc -lnosys -lgcc}: Freestanding with math library
+\end{itemize}
+
+\section{Memory Map}
+
+\begin{table}[htbp]
+\centering
+\caption{Memory regions defined in \texttt{stm32h753.ld}.}
+\label{tab:A:memory}
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Region} & \textbf{Address} & \textbf{Size} & \textbf{Use} \\
+\midrule
+Flash & \texttt{0x08000000} & 2\,MB & Code, vector table, rodata \\
+AXI SRAM & \texttt{0x24000000} & 512\,KB & Data, BSS, stacks, buffers \\
+SDRAM & \texttt{0xD0000000} & 32\,MB & Kinematic history (optional) \\
+\bottomrule
+\end{tabular}
+\end{table}

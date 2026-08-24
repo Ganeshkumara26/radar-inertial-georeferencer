@@ -1,0 +1,59 @@
+\chapter{Renode Simulation Scripts}
+\label{app:D}
+
+This appendix documents the Renode simulation infrastructure used for verification.
+
+\section{Platform Description}
+
+The Renode platform file \texttt{sim/stm32h753.repl} is copied from Renode's built-in platforms with one modification: the CRC peripheral block is commented out because Renode's \texttt{CRC.STM32F0\_CRC} model is not compatible with the STM32H753 platform description.
+
+\section{Simulation Script Structure}
+
+\begin{lstlisting}[style=plainstyle]
+# Create machine and load platform
+mach create "edp-georef-coprocessor"
+machine LoadPlatformDescription @stm32h753.repl
+
+# Configure UART output logging
+showAnalyzer sysbus.usart1
+sysbus.usart1 CreateFileBackend @uart_output.log
+
+# Load firmware
+sysbus LoadELF @D:\Desktop\edp_firmware.elf
+
+# Run initialization
+emulation RunFor "0.05"
+
+# Inject MAVLink packets via backdoor and run pipeline
+sysbus WriteByte <addr> <byte>
+...
+sysbus WriteDoubleWord 0x24000010 <byte_count>
+emulation RunFor "0.1"
+
+quit
+\end{lstlisting}
+
+\section{Stimuli Generation}
+
+Real MAVLink v2 packets are generated using pymavlink:
+\begin{lstlisting}[style=plainstyle]
+python3 sim/generate_stimuli.py > sim/generated_stimuli.rescript
+\end{lstlisting}
+
+\section{Simulation Backdoors}
+
+\begin{table}[htbp]
+\centering
+\caption{AXI SRAM backdoor addresses used for HIL testing.}
+\label{tab:D:backdoors}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Address} & \textbf{Name} & \textbf{Purpose} \\
+\midrule
+\texttt{0x24000010} & \texttt{sim\_rx\_count} & RX byte count (parser poll) \\
+\texttt{0x24000014} & \texttt{sim\_frame\_sync} & Frame-sync trigger \\
+\texttt{0x24000018} & \texttt{sim\_frame\_ts} & Frame-sync timestamp \\
+\texttt{0x2400001C} & \texttt{sim\_radar\_trigger} & Radar target re-arm \\
+\bottomrule
+\end{tabular}
+\end{table}
