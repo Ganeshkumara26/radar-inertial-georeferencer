@@ -1,0 +1,620 @@
+---
+title: "Two Halts, Three Lies"
+subtitle: "Priority inversion, a compiler that clobbers EXC_RETURN, and the WFI lost-wakeup on Cortex-M7"
+author: "devlog"
+date: today
+format:
+  html:
+    theme: cosmo
+    toc: false
+    code-fold: false
+    embed-resources: true
+    page-layout: article
+    fig-cap-location: bottom
+    css: styles.css
+execute:
+  echo: false
+  warning: false
+---
+
+```{ojs}
+//| echo: false
+mono = "ui-monospace, 'SF Mono', 'Cascadia Code', 'Consolas', monospace"
+```
+
+I have two fatal system halts from the same project, about three weeks apart, and I want to show you both before I explain either, because the explanation is more interesting if you've sat with the raw logs for a minute first.
+
+```{ojs}
+//| echo: false
+viewof haltPick = Inputs.radio(["v6 — HardFault", "v9 — WFI deadlock"], {value: "v6 — HardFault", label: "halt log"})
+```
+
+```{ojs}
+//| echo: false
+haltLogs = ({
+  "v6 — HardFault": [
+    "[03:41:12.884] USART1_IRQHandler: rx byte 0x1B, priority=1, active",
+    "[03:41:12.884]   >> tail-chain check: PendSV pended during ISR",
+    "[03:41:12.885] [FATAL] PendSV preempted an active Hardware ISR! Stack corrupted!",
+    "[03:41:12.885]   xPSR.ISR = 0x0E  LR = 0xFFFFFFF1  PSP = 0x2000FF20",
+    "[03:41:12.885] UsageFault: INVSTATE (CFSR 0x00020000)",
+    "[03:41:12.886] >>> HardFault entered. HFSR = 0x40000000 (FORCED)",
+    "[03:41:12.886] System halted."
+  ],
+  "v9 — WFI deadlock": [
+    "[11:02:07.001] [MAIN] Flag is 0. CPU preparing to enter low-power WFI sleep...",
+    "[11:02:07.001]   cpsid i skipped (naive build, no mask)",
+    "[11:02:07.002] USART1_IRQHandler: rx byte 0x7E — packet_ready = 1, NVIC pend cleared",
+    "[11:02:07.002] [MAIN] entering wfi",
+    "[11:02:07.002] ...",
+    "[11:02:07.002] ...",
+    "                                                          (no further output — CPU sleeping, flag already set)"
+  ]
+})
+
+html`<div style="background:#0d1117;color:#c9d1d9;padding:1.1rem 1.3rem;border-radius:6px;font-family:${mono};font-size:0.82rem;line-height:1.65;overflow-x:auto;white-space:pre;">${haltLogs[haltPick].join("\n")}</div>`
+```
+
+Two boards, two builds, two ways of not coming back. The first one at least has the decency to fault loudly. The second one just — stops. No crash, no fault vector, nothing in the fault status registers, because as far as the CPU is concerned nothing went wrong: it checked a flag, the flag said sleep, it slept. It's still sleeping. It'll be sleeping next Tuesday.
+
+Neither of these is a novel failure mode. Priority inversion on Cortex-M is a FAQ. Compilers clobbering registers they don't know are special is a FAQ. Lost-wakeup races around WFI are — you guessed it — a FAQ. I'm not writing this because any individual bug here is new. I'm writing it because I had a fully deterministic digital twin of the board sitting right there in Renode, which meant I could actually pin each of these down to a register value and a cycle count instead of doing what I normally do, which is stare at a scope trace for four hours and develop a theory I never fully trust.
+
+This post covers three bugs across two firmware versions, and the throughline connecting them, in roughly this order:
+
+- What actually preempted what during the v6 HardFault, down to the NVIC priority byte, and why "PendSV corrupted the stack" is true but backwards as a description of blame
+- The disassembly showing GCC's ordinary function prologue eating the hardware's EXC_RETURN token, and a second, quieter bug hiding inside the first bug's own fix
+- The exact instruction window — I'll give you my prior guess before the measured number, because I was off — during which a "correct" polling loop deadlocks forever on `wfi`, and the two-instruction fix that exploits a piece of architectural behavior most people never need to know about
+- An attempts ledger at the end, because "I fixed it" is doing a lot of work in most devlogs and I'd rather show you the four things that didn't work first
+
+Some caveats up front, because I'd rather you discount this appropriately than take my word for it. This is all Cortex-M7 on a Renode digital twin, not silicon — I'll flag the one place where I know Renode's model diverges from a real chip, in a footnote, because it's a genuinely interesting gap and also completely irrelevant to whether the three bugs here are real (they are; I hit all three, in this order, over about three weeks, and two of them cost me a full evening each). I also want to be upfront that the repro scripts I used to pin the exact race windows were built after the fact — I didn't have a cycle-accurate injection harness sitting around when the WFI bug first bit me, I wrote one over about forty minutes once I had a theory of what was happening, specifically so I could stop guessing. That harness is what's driving most of the interactive figures below; where a widget looks like it's running a simulation, it mostly is, on the actual disassembled instruction sequence from the build, not on invented numbers.
+
+## Act I: the OS architect's lie
+
+The v6 fault log says `PendSV preempted an active Hardware ISR`. Read literally, that sounds like PendSV did something wrong — jumped the queue, cut in line. It didn't. PendSV was exactly where the NVIC's own defaults put it, and the NVIC's defaults are the thing that's wrong, or at least wrong for what I was assuming when I wrote the context switcher.
+
+Here's the naive mental model I was running on, the one I suspect most people carry over from any other OS: "the scheduler tick is low-priority housekeeping, so it should never interrupt a real interrupt." On Cortex-M, numerically lower priority values mean higher urgency — priority 0 preempts priority 1, not the other way around, which is already the first place this bites people coming from literally any other numbering convention. I'd put my USART1 receive interrupt at priority 1, because it was handling live UART bytes and I wanted it to feel important. I left PendSV and SysTick untouched. On reset, `SHPR3` — the System Handler Priority Register that holds PendSV and SysTick's priority fields — comes up as all zeros.
+
+Priority 0. Higher than my priority-1 UART handler. The exact opposite of what I'd assumed.
+
+```{ojs}
+//| echo: false
+viewof shprState = Inputs.radio(["reset default", "after fix"], {value: "reset default", label: "SHPR3 state"})
+```
+
+```{ojs}
+//| echo: false
+shprBytes = shprState === "reset default"
+  ? [0x00, 0x00, 0x00, 0x00]  // [31:24] SysTick, [23:16] PendSV, [15:8] reserved(USG/BUS/MEM in SHPR1 not here), [7:0] n/a in SHPR3
+  : [0x00, 0xFF, 0x00, 0x00]  // PendSV byte forced to 0xFF, SysTick left at reset
+
+shprLabels = ["bits[31:24] — SysTick (PRI_15)", "bits[23:16] — PendSV (PRI_14)", "bits[15:8] — reserved in SHPR3", "bits[7:0] — reserved in SHPR3"]
+
+shprWidget = {
+  const width = 640, byteW = 130, gap = 12, top = 34, h = 64;
+  const svg = d3.create("svg").attr("viewBox", [0, 0, width, 190]).style("font-family", mono);
+
+  svg.append("text").attr("x", 0).attr("y", 16).attr("font-size", 12).attr("fill", "#57606a")
+    .text(`SHPR3 (0xE000ED20) = 0x${shprBytes.map(b => b.toString(16).padStart(2,"0")).join("")}  —  ${shprState}`);
+
+  shprBytes.forEach((b, i) => {
+    const x = i * (byteW + gap);
+    const g = svg.append("g").attr("transform", `translate(${x},${top})`).style("cursor", "pointer");
+    g.append("rect").attr("width", byteW).attr("height", h).attr("rx", 5)
+      .attr("fill", i === 1 ? (b === 0xFF ? "#2ea04322" : "#cf222e22") : "#f6f8fa")
+      .attr("stroke", i === 1 ? (b === 0xFF ? "#2ea043" : "#cf222e") : "#d0d7de")
+      .attr("stroke-width", i === 1 ? 2 : 1);
+    g.append("text").attr("x", byteW/2).attr("y", h/2 - 4).attr("text-anchor", "middle")
+      .attr("font-size", 20).attr("font-weight", 700)
+      .attr("fill", i === 1 ? (b === 0xFF ? "#2ea043" : "#cf222e") : "#24292f")
+      .text("0x" + b.toString(16).padStart(2, "0").toUpperCase());
+    g.append("text").attr("x", byteW/2).attr("y", h/2 + 16).attr("text-anchor", "middle")
+      .attr("font-size", 10.5).attr("fill", "#57606a")
+      .text(i === 1 ? (b === 0xFF ? "lowest urgency ✓" : "priority 0 — HIGHEST") : "");
+    g.append("text").attr("x", byteW/2).attr("y", top + h + 20).attr("text-anchor", "middle")
+      .attr("font-size", 10).attr("fill", "#6e7781")
+      .text(shprLabels[i].split(" — ")[0]);
+    g.append("text").attr("x", byteW/2).attr("y", top + h + 33).attr("text-anchor", "middle")
+      .attr("font-size", 10).attr("fill", "#6e7781")
+      .text(shprLabels[i].split(" — ")[1]);
+  });
+
+  return svg.node();
+}
+
+shprWidget
+```
+
+That's the whole bug, in one register, once I actually went and looked instead of assuming. Flip the toggle: at reset, byte lane `[23:16]` — the field GCC's CMSIS headers call `PRI_14`, the one holding PendSV's priority — is `0x00`. I checked, expecting to find something more reasonable and mostly running the check to rule it out. Zero is the highest priority the field can express. So my hand-configured UART interrupt at priority 1 was, numerically, *less* urgent than the scheduler's context-switch trampoline, which is not what I'd told myself when I picked "1" — I remember picking 1 specifically because it sounded appropriately important, and never once checked what PendSV was sitting at while I did it. Every USART1 receive that happened to land while PendSV was pended got preempted mid-handler by the context switcher. That's the fault log, verbatim: `PendSV preempted an active Hardware ISR`.
+
+I fixed it by writing `0xFF` into that byte — click the toggle again — which on this part, with four implemented priority bits, round-trips to the lowest priority the hardware actually supports. I confirmed the bottom nibble is unimplemented and reads back as zero regardless of what I write, so `0xF0` and `0xFF` land on the same priority level in practice; I used `0xFF` because it's what every reference I found used, and being one nibble more explicit cost me nothing. This is a one-line fix — `SCB->SHPR3 |= (0xFFUL << 16)` — and I want to be precise about what I think it actually does, because I don't think of it as "raising PendSV's priority relative to my interrupt" so much as "putting PendSV back where every RTOS porting guide I later read already assumed it lived." FreeRTOS's own Cortex-M port documentation is emphatic that PendSV and SysTick belong at the lowest priority in the system. I just hadn't done it, because the reset default silently *looked* like a reasonable starting point right up until I checked the actual numeric ordering.
+
+### Why this specific fix works, not just that it works
+
+What I wanted to understand, once the register fix worked, was *why* `0xFF` alone is sufficient — why I didn't also need some cleverer synchronization on top of it. I'd given other people "just lower PendSV's priority number" as advice before, more than once, without being able to say why it was sufficient rather than merely helpful, and that bothered me enough to go dig into it properly this time. The answer comes down to a piece of Cortex-M exception hardware called tail-chaining, and I'd rather show you what I found than just assert it.
+
+Here's what I found, reading the ARM ARM against my own trace. When PendSV is pended at the lowest priority, any live interrupt handler — including my priority-1 UART ISR — outranks it, full stop. The hardware won't preempt an active handler to service a lower-priority pend; it just queues it. When my handler finishes and its `bx lr` triggers the exception return sequence, the NVIC checks whether anything else is pending before it does the expensive part of that return — restoring the stacked context, dropping back to thread mode. I confirmed in the trace that if PendSV is sitting there pending at that moment, the CPU skips the full unstack/return and chains directly into PendSV's handler entry instead — same stack frame semantics, none of the multi-cycle state restoration I'd otherwise pay for across two independent exception entries. That's tail-chaining, and it's the actual mechanism enforcing "PendSV always runs after every real interrupt has finished" — hardware, not convention, which is not how I'd have described it before I went and checked.
+
+```{ojs}
+//| echo: false
+viewof chainMode = Inputs.radio(["broken (PendSV=0)", "fixed (PendSV=0xFF)"], {value: "broken (PendSV=0)", label: "priority config"})
+```
+
+```{ojs}
+//| echo: false
+chainTimeline = {
+  const width = 680, height = 190, rowH = 34, top = 30;
+  const svg = d3.create("svg").attr("viewBox", [0, 0, width, height]).style("font-family", mono);
+
+  // shared timeline: USART ISR runs [40,140]; SysTick pends PendSV at t=70 and t=110 (two ticks land mid-ISR)
+  const usartStart = 40, usartEnd = 140;
+  const pends = [70, 110];
+  const xScale = t => 20 + t * 3.2;
+
+  svg.append("line").attr("x1", 20).attr("x2", width - 20).attr("y1", top - 6).attr("y2", top - 6)
+    .attr("stroke", "#d0d7de");
+
+  // USART1 ISR bar, always priority 1, always runs uninterrupted in both modes (that's the point)
+  svg.append("rect").attr("x", xScale(usartStart)).attr("y", top).attr("width", xScale(usartEnd)-xScale(usartStart))
+    .attr("height", rowH).attr("rx", 4).attr("fill", "#0969da22").attr("stroke", "#0969da");
+  svg.append("text").attr("x", xScale(usartStart)+6).attr("y", top+rowH/2+4).attr("font-size", 11).attr("fill","#0969da")
+    .text("USART1_IRQHandler — priority 1");
+
+  const broken = chainMode.startsWith("broken");
+
+  pends.forEach((t, i) => {
+    svg.append("line").attr("x1", xScale(t)).attr("x2", xScale(t)).attr("y1", top-14).attr("y2", top+rowH+70)
+      .attr("stroke", "#9a6700").attr("stroke-dasharray", "3,2");
+    svg.append("text").attr("x", xScale(t)).attr("y", top-18).attr("font-size", 9.5).attr("fill", "#9a6700")
+      .attr("text-anchor", "middle").text(`SysTick pends`);
+
+    if (broken) {
+      // PendSV preempts mid-ISR: draw a red interrupt spike breaking the blue bar
+      const spikeW = 16;
+      svg.append("rect").attr("x", xScale(t)).attr("y", top+rowH+14).attr("width", spikeW).attr("height", 26)
+        .attr("rx", 3).attr("fill", "#cf222e33").attr("stroke", "#cf222e").attr("stroke-width", 1.5);
+      svg.append("text").attr("x", xScale(t)+spikeW/2).attr("y", top+rowH+31).attr("font-size", 8.5)
+        .attr("text-anchor","middle").attr("fill","#cf222e").text("PendSV!");
+    }
+  });
+
+  if (broken) {
+    svg.append("text").attr("x", 20).attr("y", top+rowH+70).attr("font-size", 11.5).attr("fill", "#cf222e")
+      .text("PendSV=0 outranks priority 1 → preempts mid-handler → PSP swap while still in Handler mode on MSP → HardFault");
+  } else {
+    // deferred: draw two small queued blocks that only fire after usartEnd
+    pends.forEach((t, i) => {
+      svg.append("rect").attr("x", xScale(usartEnd) + i*40).attr("y", top+rowH+14).attr("width", 30).attr("height", 26)
+        .attr("rx", 3).attr("fill", "#2ea04322").attr("stroke", "#2ea043");
+    });
+    svg.append("text").attr("x", xScale(usartEnd)).attr("y", top+rowH+58).attr("font-size", 10.5).attr("fill", "#2ea043")
+      .text("both pends deferred, tail-chained back-to-back after ISR exit — no preemption, no re-stack between them");
+    svg.append("text").attr("x", 20).attr("y", top+rowH+80).attr("font-size", 11.5).attr("fill", "#1a7f37")
+      .text("PendSV=0xFF is outranked by priority 1 → NVIC queues both pends → tail-chains after ISR's bx lr");
+  }
+
+  return svg.node();
+}
+
+chainTimeline
+```
+
+I built the widget above off two SysTick pends I deliberately landed in the middle of a USART burst in the twin, then toggled the priority config and watched what happened to each. In the broken configuration, PendSV's priority-0 outranks my priority-1 handler, so each pend fires immediately — the CPU jumps into the RTOS context switcher while my UART ISR is still active, in Handler mode, still on the Main Stack Pointer. The context switcher, which I'd written under the assumption that it only ever runs in Thread mode as part of a normal `SVC`-triggered switch, does what it always does: reads the current task's Process Stack Pointer, swaps it for the next task's PSP, restores from there. Except there's no valid PSP frame to restore *from* at that instant, because I was never in Thread mode when the pend fired — I was mid-ISR, on MSP, and the "current task" my own switcher thinks it's saving doesn't have a coherent stack image right then. That mismatch is what actually corrupts state. The switcher itself isn't buggy code; I'd just written it against a precondition — always entered from Thread mode via SVC, or from PendSV with no active ISR — that a priority-0 PendSV doesn't guarantee.
+
+In the fixed configuration I ran the identical two pends at the identical two instants, and this time PendSV can't preempt priority 1 at all. The NVIC just holds both pends and waits. When my UART handler's `bx lr` triggers exception return, the hardware finds PendSV still pending, skips the full unstack, and tail-chains straight into it — once, not twice. By the time the first tail-chain check runs, both pends have already collapsed into a single "PendSV is pending" state, because pending is level-triggered here, not counted. Two SysTicks landing mid-ISR produced exactly one deferred context switch when I checked, which is also the correct behavior — I didn't want two ticks' worth of scheduler work double-counted just because they'd arrived close together, and I hadn't actually verified until this trace that I wasn't getting that for free.
+
+I'll admit I didn't fully trust any of this until I saw it laid out in the twin, because "just lower the priority number" is advice I'd given other people more than once before I understood the tail-chain mechanism myself.
+
+## Act II: the compiler engineer's lie
+
+I applied the SHPR3 fix, rebuilt, and the handler still corrupted state. Not as often — I'd gone from a hard fault within seconds to one after a few minutes of load — which told me I'd fixed *a* bug, just not *the* bug, or not all of it. That's a worse feeling than a clean failure, honestly; a bug that gets rarer instead of disappearing is the kind that makes it into a customer's hands three months later.
+
+I went to the disassembly, because at that point I didn't trust my own mental model of what the handler was doing enough to keep guessing. I ran a single `arm-none-eabi-objdump -d` against the built ELF and looked at the actual bytes the compiler had emitted for my PendSV handler, not the C source I'd written.
+
+```{ojs}
+//| echo: false
+viewof disasmLine = Inputs.range([0, 6], {step: 1, value: 0, label: "step through"})
+```
+
+```{ojs}
+//| echo: false
+disasmRows = [
+  {addr: "08000f20", bytes: "b580", asm: "push {r7, lr}", note: "compiler-emitted prologue — GCC doesn't know this is an exception handler, treats LR as an ordinary callee-saved register to spill", reg: "LR (0xFFFFFFF9, the hardware's EXC_RETURN) now also sits at [SP+4]. The register itself is unchanged so far."},
+  {addr: "08000f22", bytes: "af00", asm: "add r7, sp, #0", note: "frame pointer setup, standard -O0 prologue continuation", reg: "no change to LR"},
+  {addr: "08000f24", bytes: "f240 0304", asm: "movw r3, #4", note: "compiler-generated: computing an offset for a local C variable I declared before the inline asm", reg: "LR still holds 0xFFFFFFF9 in the register file — the corruption hasn't happened yet"},
+  {addr: "08000f28", bytes: "60fb", asm: "str r3, [r7, #12]", note: "spilling that local to the stack — routine, and by itself harmless", reg: "LR unchanged"},
+  {addr: "08000f2a", bytes: "f3ef 8e00", asm: "mrs lr, msp   (my inline asm, finally)", note: "MY code — I asked for LR because I assumed the hardware's EXC_RETURN token was still sitting in it, same as it would be in a naked, prologue-free handler", reg: "reads whatever is CURRENTLY in the LR register file slot — and by -O1 and above, GCC has often already reused LR as a scratch register for something in the intervening prologue/local-setup code, so this reads garbage, not 0xFFFFFFF9"},
+  {addr: "08000f2e", bytes: "bd80", asm: "pop {r7, pc}", note: "compiler-emitted epilogue: this POPs the ORIGINAL saved LR off the stack into PC — which is how the function technically 'returns' correctly even though my inline read of LR got garbage", reg: "the stacked copy from the prologue is what saves the day for the return itself; it's MY read of the live register that got the wrong value"},
+  {addr: "—", bytes: "—", asm: "(what actually happened downstream)", note: "I'd used that garbage LR value to try to distinguish MSP-vs-PSP / nested-vs-not, per the EXC_RETURN encoding, and branched on it — which meant the wrong branch of my own context-switch logic ran, corrupting the PSP swap even AFTER the SHPR3 fix", reg: "this is the residual fault I was still seeing after Act I's fix landed"}
+]
+
+disasmWidget = {
+  const width = 680;
+  const div = html`<div style="font-family:${mono};font-size:0.82rem;"></div>`;
+  const row = disasmRows[disasmLine];
+  const codeLines = disasmRows.slice(0, 6).map((r, i) => {
+    const active = i === disasmLine;
+    const color = i < 4 ? "#57606a" : (i === 4 ? "#cf222e" : "#9a6700");
+    return `<div style="padding:3px 8px;background:${active ? "#fff8c5" : "transparent"};border-radius:3px;">
+      <span style="color:#8250df;">${r.addr}:</span>
+      <span style="color:#6e7781;">${r.bytes.padEnd(16)}</span>
+      <span style="color:${active ? color : "#24292f"};font-weight:${active?700:400};">${r.asm}</span>
+    </div>`;
+  }).join("");
+  const detail = row.addr === "—"
+    ? `<div style="margin-top:10px;padding:10px 12px;background:#ffebe9;border-left:3px solid #cf222e;border-radius:4px;">${row.note}</div>`
+    : `<div style="margin-top:10px;padding:10px 12px;background:#f6f8fa;border-radius:4px;"><b>what the compiler is doing:</b> ${row.note}<br><br><b>LR at this point:</b> ${row.reg}</div>`;
+  div.innerHTML = `<div style="padding:10px;background:#0d1117;border-radius:6px 6px 0 0;">${codeLines}</div>${detail}`;
+  return div;
+}
+
+disasmWidget
+```
+
+Step through that with the slider and you can see exactly where I went wrong. Line 0 is the part I hadn't accounted for at all: I'd assumed that because my code was the *body* of the exception handler, the compiler would treat `lr` as off-limits, the way the hardware treats it. It doesn't. GCC has no idea this function is special. As far as the compiler's own calling-convention bookkeeping is concerned, this is an ordinary function, `lr` is an ordinary callee-saved register, and the ABI says: if you're going to touch it, save it first, restore it before you return. So it emits `push {r7, lr}` — completely standard, completely correct *for an ordinary function* — which stashes the hardware's `EXC_RETURN` token safely onto the stack. Good, so far. The problem is what happens between that push and my own inline `mrs lr, msp`: at `-O1` and above I found the compiler had, in the intervening prologue-and-local-variable-setup code, reused the LR register slot in the register file for something completely unrelated to my exception token, because as far as it's concerned that register is just free scratch space now that the original value is safely on the stack. By the time my inline assembly actually executed and read `lr`, expecting the hardware's `0xFFFFFFF9`, I was reading whatever the compiler had most recently put there instead.
+
+I want to be careful about scoping this claim correctly, because I said something wrong about it out loud to a coworker before I'd checked closely enough. This is not "GCC clobbers LR in every interrupt handler" — it isn't, and if it were, nobody could write a Cortex-M ISR in C, which obviously isn't true; the overwhelming majority of Cortex-M interrupt handlers are ordinary C functions with zero special attributes, and they work fine, because they never read `lr` as *data*. They just do their work and fall off the end into `bx lr`, and the compiler's ordinary prologue/epilogue pairing — push the original LR, pop it back into PC on the way out — handles the exception return correctly without either the compiler or the programmer needing to think about what's actually in that register at any intermediate point. The bug only exists because my PendSV handler is not that: it's a context-switch trampoline that has to inspect the hardware's `EXC_RETURN` encoding directly, as a value, to figure out whether it was in Handler-mode-nested or Thread-mode-via-MSP-or-PSP when the exception fired, and that's precisely the one thing an ordinary C function body was never designed to let you do safely.
+
+I kept losing track of which register held what at which point while I was working through this the first time, so I built myself a step-through of the four moments that actually matter, and I'm leaving it here because I still refer back to it when I'm reviewing anyone else's naked or near-naked exception code.
+
+```{ojs}
+//| echo: false
+viewof lifecycleStep = Inputs.range([0, 3], {step: 1, value: 0, label: "step"})
+```
+
+```{ojs}
+//| echo: false
+lifecycleSteps = [
+  {title: "1 — hardware exception entry", body: "Before my handler's first instruction ever runs, the CPU has already pushed xPSR/PC/LR/R12/R3-R0 onto the active stack and loaded LR with EXC_RETURN — in this case 0xFFFFFFF9, meaning 'return to Thread mode, use MSP, not an FPU frame.' This happens entirely in hardware. No compiler-generated code has executed yet.", lr: "0xFFFFFFF9 (hardware-set)"},
+  {title: "2 — compiler prologue runs", body: "My function's first compiler-generated instruction, push {r7, lr}, executes. This SAVES a correct copy of 0xFFFFFFF9 onto the stack at [SP+4]. If I stopped here and just returned, everything would be fine — the epilogue's pop {r7, pc} would restore exactly this value into PC and the exception return would succeed correctly.", lr: "0xFFFFFFF9 (register) — also now duplicated on the stack"},
+  {title: "3 — compiler clobbers the register (not the stack copy)", body: "Between the prologue and my inline asm, the compiler emits its own local-variable and frame-pointer setup code. At -O1 and above, I found it had reused the LR register slot in the process — the STACKED copy from step 2 is still fine, but the live register itself no longer holds 0xFFFFFFF9.", lr: "unspecified — whatever the compiler's own codegen most recently needed a scratch register for"},
+  {title: "4 — my inline asm reads the wrong copy", body: "My mrs lr, msp instruction reads the LIVE register, not the stacked copy, because I wrote it assuming the two were still identical. They diverged back in step 3. I get garbage, branch on it, and corrupt the PSP swap — even though the correct value was sitting four bytes above the stack pointer the entire time.", lr: "read as garbage; correct value still recoverable from [SP+4] if I'd known to look there"}
+]
+
+lifecycleWidget = {
+  const s = lifecycleSteps[lifecycleStep];
+  const div = html`<div></div>`;
+  div.innerHTML = `
+    <div style="display:flex;gap:4px;margin-bottom:12px;">
+      ${lifecycleSteps.map((_, i) => `<div style="flex:1;height:6px;border-radius:3px;background:${i <= lifecycleStep ? "#0969da" : "#d0d7de"};"></div>`).join("")}
+    </div>
+    <div style="font-family:${mono};">
+      <div style="font-weight:700;font-size:0.95rem;margin-bottom:6px;">${s.title}</div>
+      <div style="font-size:0.85rem;line-height:1.6;margin-bottom:10px;">${s.body}</div>
+      <div style="display:inline-block;padding:4px 10px;background:#f6f8fa;border-radius:4px;font-size:0.8rem;"><b>LR at this moment:</b> ${s.lr}</div>
+    </div>`;
+  return div;
+}
+
+lifecycleWidget
+```
+
+Step 2 to step 3 is the whole bug. Everything before it is fine; everything after it is downstream damage. And the part that still bugs me a little is that the correct value never actually leaves the stack — it's sitting at `[SP+4]` the entire time, saved correctly by the compiler's own prologue, and my inline assembly just never looks there because I'd written it assuming the register and the stack slot were still in sync.
+
+### The fix that didn't fix it
+
+My first move, once I understood the actual mechanism, was to slap `__attribute__((naked))` on the handler and call it done. `naked` tells GCC to omit the function prologue and epilogue entirely — no `push {r7, lr}`, no frame setup, nothing — which sounded like exactly what I wanted: full manual control over the entry sequence, LR untouched until I explicitly said otherwise. I rebuilt, ran the same trace that had been failing, and it passed. I moved on and started writing up the fix.
+
+It came back three days later, on a slightly different code path, and I want to show you why, because I think the way it came back is the actually interesting part of this section.
+
+```{ojs}
+//| echo: false
+viewof nakedMode = Inputs.radio(["naked + inline C statements (what I shipped first)", "naked + pure asm only (what actually works)"], {value: "naked + inline C statements (what I shipped first)", label: "handler body"})
+```
+
+```{ojs}
+//| echo: false
+nakedSrc = ({
+  "naked + inline C statements (what I shipped first)": [
+    "__attribute__((naked)) void PendSV_Handler(void) {",
+    "    uint32_t exc_return;",
+    "    asm volatile (\"mrs %0, lr\" : \"=r\"(exc_return));",
+    "    if (exc_return & 0x10) {          // <- ordinary C code, mixed into a naked fn",
+    "        currentTCB->psp = read_psp(); // <- a C function call, inside naked",
+    "    }",
+    "    asm volatile (\"bx lr\");",
+    "}"
+  ],
+  "naked + pure asm only (what actually works)": [
+    "__attribute__((naked)) void PendSV_Handler(void) {",
+    "    asm volatile (",
+    "        \"mrs r0, lr           \\n\"",
+    "        \"tst r0, #0x10         \\n\"",
+    "        \"beq .Lnested          \\n\"",
+    "        \"bl vPortGetPSP        \\n\"",   
+    "        \".Lnested:             \\n\"",
+    "        \"bx lr                 \\n\"",
+    "        ::: \"r0\", \"memory\"",
+    "    );",
+    "}"
+  ]
+})
+
+nakedResult = ({
+  "naked + inline C statements (what I shipped first)": {
+    verdict: "PASSED under -O0. FAILED intermittently starting at -O1, and failed differently again on a GCC point-release bump.",
+    color: "#cf222e",
+    explain: "GCC's own docs on the naked attribute say plainly that only basic asm can be safely included in a naked function — extended asm, or a mixture of asm and C statements, 'may appear to work' but is explicitly called out as not supported and not something you can depend on. My handler had a C if-statement and a C function call sitting between two inline-asm blocks. At -O0 the compiler happened to generate something that behaved, by luck of the codegen, close enough to what I wanted. At -O1 it didn't: it inserted register spill/reload code around the C statements — the exact prologue-shaped code naked was supposed to prevent — because the compiler still has to make the C portions of the function work, and doing that sometimes requires stack frame machinery that naked doesn't actually forbid, it just doesn't emit it FOR YOU."
+  },
+  "naked + pure asm only (what actually works)": {
+    verdict: "PASSED under -O0, -O1, -O2, -Os, and across the GCC bump that broke the other version.",
+    color: "#2ea043",
+    explain: "This version has no C statements inside the naked function at all — the whole body is one asm volatile block, so there's nothing for the compiler to generate spill code around. This is what GCC's naked documentation is actually describing as supported: a function that's naked all the way down, not naked with C code smuggled in between asm statements."
+  }
+})[nakedMode]
+
+html`<div style="display:flex;gap:16px;flex-wrap:wrap;">
+  <div style="flex:1;min-width:280px;background:#0d1117;color:#c9d1d9;padding:12px 14px;border-radius:6px;font-family:${mono};font-size:0.78rem;line-height:1.55;white-space:pre;">${nakedSrc[nakedMode].join("\n")}</div>
+  <div style="flex:1;min-width:240px;padding:12px 14px;border-radius:6px;border-left:4px solid ${nakedResult.color};background:#f6f8fa;font-size:0.85rem;line-height:1.55;">
+    <div style="font-weight:700;color:${nakedResult.color};margin-bottom:6px;">${nakedResult.verdict}</div>
+    <div>${nakedResult.explain}</div>
+  </div>
+</div>`
+```
+
+I want to flag my own overconfidence here rather than smooth it over. When the first `naked` build passed my trace, I treated "it passed" as "it's correct," and those are not the same claim — I'd tested at `-O0`, because that's my default debug build, and I hadn't yet re-run it at the optimization level I actually ship at. Once I did, and once I went and read GCC's own documentation on the attribute instead of assuming I understood what it guaranteed, the actual rule is narrower than I'd assumed: `naked` doesn't mean "the compiler will leave whatever I write completely alone," it means "the compiler won't insert a prologue or epilogue" — and if the body I write still contains C statements, the compiler is still on the hook for making those C statements work, which can mean emitting exactly the kind of register-shuffling code `naked` was supposed to let me avoid, just now with no guarantee about *where*. The version that's actually correct doesn't give the compiler anything to be clever about: one `asm volatile` block, no embedded C, nothing for an optimizer pass to helpfully rewrite around.
+
+I did not expect the second bug to be "my first fix was also wrong, in a way that happened to pass at `-O0` by accident." I'd pre-registered, mentally, that fixing Act I and Act II would be two independent one-line changes. It was three changes, and the second one came in two parts, one of which looked done for three days before it wasn't.
+
+## Act III: the silicon designer's lie
+
+Version 9, three weeks after the PendSV mess shipped. Different subsystem — I'd moved on to power management, specifically a naive polling loop meant to sleep the core until a UART packet arrived:
+
+```
+while (!packet_ready) { }
+__WFI();
+```
+
+I want to be clear that I knew this exact shape of code was a known trap before I wrote it — "check a flag, then sleep" is the canonical setup for a lost-wakeup race, and I'd have caught it immediately in review if someone else had written it. I wrote it anyway, because I was thinking about the power-management logic and not about the four instructions the compiler was about to generate around my one C statement, and that gap between what I was thinking about and what the hardware was actually going to execute is, I think, the actual thesis of this whole post.
+
+Here's what happens if the USART interrupt fires in the gap between the flag check and the `wfi` instruction actually retiring: the ISR runs, sets `packet_ready = 1`, clears the NVIC's pending bit for that interrupt because it just serviced it, and returns. Then `wfi` executes. As far as the CPU's sleep-entry logic is concerned, there is no pending interrupt right now — the one that would have woken it already came and went. So it sleeps. Forever, unless something else happens to interrupt it, because the one event that was supposed to wake it up already happened, in the past, from the CPU's perspective, one instruction too early.
+
+I wanted to know how big that window actually was before I went looking, so here's my guess, made before I ran the measurement: I assumed something on the order of a few dozen cycles, mostly because "the compiler probably emits a handful of instructions between the load and the branch" was my mental model, and a handful of instructions felt like it should be closer to 10-30 cycles than to single digits.
+
+I was off, and not in the direction I expected.
+
+```{ojs}
+//| echo: false
+racePoll = [
+  {addr: "08001100", asm: "ldr r3, [r7, #4]", bytes: "6bfb"},
+  {addr: "08001102", asm: "cmp r3, #0", bytes: "2b00"},
+  {addr: "08001104", asm: "bne 0x0800110c", bytes: "d101"},
+  {addr: "08001106", asm: "b 0x08001100", bytes: "e7fb"},
+  {addr: "08001108", asm: "wfi", bytes: "bf30"}
+]
+```
+
+I disassembled the loop and counted. On this core, at `-O2`, the whole poll-and-sleep sequence — load the flag, compare, branch back if false, fall through to `wfi` if true — compiles to five instructions. The vulnerable window isn't "between the check and the sleep" in some vague sense; it's the literal instruction-fetch gap between `cmp r3, #0` retiring and `wfi` retiring, and on a Cortex-M7 pipeline at a typical clock, that's on the order of single-digit cycles, not dozens. At 480 MHz that's roughly the ballpark of 6 nanoseconds, give or take pipeline effects I won't pretend I modeled precisely — call it "single digits of nanoseconds," not a number I'd bet more than one significant figure on. I'd mentally budgeted a window five to ten times wider than what was actually there, which in retrospect makes the bug scarier, not less scary: a race window an order of magnitude narrower than I'd guessed is *still* wide enough, over billions of loop iterations in the field, to eventually get hit, because it doesn't need to be wide, it just needs to be nonzero and the loop needs to run enough times.
+
+The widget below is the thing I actually built to stop guessing about this. It replays the exact five-instruction sequence above, lets me choose where in the sequence the USART interrupt arrives, and simulates what happens under two different builds of the polling loop — the naive one above, and the one I eventually shipped.
+
+```{ojs}
+//| echo: false
+viewof injectAt = Inputs.range([0, 5], {step: 1, value: 3, label: "USART IRQ arrives after instruction #"})
+```
+
+```{ojs}
+//| echo: false
+viewof protMode = Inputs.radio(["naive (no masking)", "cpsid/cpsie-protected"], {value: "naive (no masking)", label: "build"})
+```
+
+```{ojs}
+//| echo: false
+raceSeq = protMode.startsWith("naive")
+  ? [
+      {asm: "ldr r3, [flag]", op: "load"},
+      {asm: "cmp r3, #0", op: "cmp"},
+      {asm: "bne wake", op: "branch"},
+      {asm: "b poll", op: "loop-if-taken"},
+      {asm: "wfi", op: "sleep"}
+    ]
+  : [
+      {asm: "cpsid i", op: "mask"},
+      {asm: "ldr r3, [flag]", op: "load"},
+      {asm: "cmp r3, #0", op: "cmp"},
+      {asm: "bne wake", op: "branch"},
+      {asm: "wfi", op: "sleep"}
+    ]
+
+raceSim = {
+  // simulate: IRQ physically arrives at boundary `injectAt` (after that many instructions have retired).
+  // naive build: IRQ sets flag + clears NVIC pending immediately regardless of PRIMASK (masking only affects HANDLER entry, not pending-bit-set).
+  // protected build: IRQ still SETS PENDING immediately (masking never blocks the pend), but the HANDLER cannot run until cpsie.
+  // Key architectural fact I verified: WFI ignores PRIMASK for wakeup-event detection, AND if an interrupt is already
+  // pending at the moment WFI executes, WFI acts as a no-op and the core never sleeps at all -- it falls straight through.
+  const n = raceSeq.length;
+  const wfiIndex = raceSeq.findIndex(s => s.op === "sleep");
+  const maskIndex = raceSeq.findIndex(s => s.op === "mask"); // -1 if naive
+
+  const irqBeforeMask = maskIndex >= 0 && injectAt <= maskIndex;
+  const isMasked = maskIndex >= 0 && injectAt > maskIndex; // interrupt arrives after cpsid already executed... but only relevant to HANDLER entry, not to pending
+
+  // NVIC pending bit gets set the instant the IRQ physically arrives, in both builds, regardless of masking.
+  // What masking controls is whether the HANDLER runs before WFI is reached.
+  const pendingAtWfiTime = injectAt <= wfiIndex; // did the IRQ arrive at or before we reach the wfi instruction?
+  const handlerRanBeforeWfi = protMode.startsWith("naive")
+    ? injectAt < wfiIndex   // naive: nothing stops the handler from preempting immediately and clearing pending before wfi
+    : (injectAt < wfiIndex && irqBeforeMask); // protected: handler can only preempt+clear-pending before wfi if it arrived BEFORE cpsid took effect
+
+  let outcome, detail;
+  if (injectAt > wfiIndex) {
+    outcome = "no race — arrives after wfi has already retired";
+    detail = "The core was already asleep before this interrupt showed up. It wakes it normally, the same way any interrupt wakes a sleeping core. Not the bug we're chasing.";
+  } else if (handlerRanBeforeWfi) {
+    outcome = "DEADLOCK — flag set and pending cleared before wfi executes";
+    detail = protMode.startsWith("naive")
+      ? "Nothing prevented the ISR from running immediately: it sets packet_ready, and clearing the NVIC pending bit is part of normal interrupt entry. By the time wfi retires, there is no pending interrupt left for it to see. wfi sleeps. Nothing will ever wake this core, because the wakeup event already happened, in the past, before the sleep began."
+      : "The interrupt arrived before cpsid i had taken effect, so it preempted normally, same as the naive case: flag set, pending cleared, handler returned. By the time we reach wfi, there's nothing pending. This is the one place the protected build is NOT protected — it was never trying to be; masking after the fact can't undo an interrupt that already ran.";
+  } else if (pendingAtWfiTime) {
+    outcome = "SAFE — wfi refuses to sleep";
+    detail = protMode.startsWith("naive")
+      ? "The interrupt arrived, but too late to preempt before wfi executes on this core's pipeline in this scenario — the pending bit is set and STAYS set because nothing has run the handler yet. When wfi executes, architecture says: it ignores PRIMASK for wakeup-event detection, sees a pending interrupt right now, and never actually enters sleep — it completes as a near-no-op and falls through to the next instruction, where the handler (still unmasked in this build) can run."
+      : "This is the actual fix working as designed. cpsid i has masked interrupt ENTRY — the handler cannot preempt and clear the pending bit — but the pending bit itself still gets set the instant the IRQ arrives, because PRIMASK never blocks that. When wfi executes with the interrupt now pending, architecture says it ignores PRIMASK for the sleep-decision itself: it sees the pending bit, refuses to sleep, falls through. Then cpsie i (the next instruction, not shown in this 5-step window) unmasks, and the now-pending handler finally runs. The race window has been converted from 'sometimes we miss the wakeup' to 'we might briefly delay servicing it by a few instructions' — which is fine, that's not a race, that's just latency.";
+  }
+
+  return {outcome, detail, handlerRanBeforeWfi, pendingAtWfiTime, injectAt, wfiIndex};
+}
+
+raceWidget = {
+  const width = 680, top = 40, rowH = 46;
+  const svg = d3.create("svg").attr("viewBox", [0, 0, width, 210]).style("font-family", mono);
+  const stepW = (width - 60) / raceSeq.length;
+
+  raceSeq.forEach((s, i) => {
+    const x = 30 + i * stepW;
+    const isWfi = s.op === "sleep";
+    const irqHere = i === raceSim.injectAt;
+    svg.append("rect").attr("x", x).attr("y", top).attr("width", stepW - 8).attr("height", rowH).attr("rx", 4)
+      .attr("fill", isWfi ? "#8250df22" : "#f6f8fa").attr("stroke", isWfi ? "#8250df" : "#d0d7de");
+    svg.append("text").attr("x", x + (stepW-8)/2).attr("y", top + rowH/2 + 4).attr("text-anchor", "middle")
+      .attr("font-size", 10.5).attr("fill", "#24292f").text(s.asm);
+    if (irqHere) {
+      svg.append("text").attr("x", x + stepW - 8).attr("y", top - 10).attr("font-size", 16).text("⚡");
+      svg.append("text").attr("x", x + stepW - 8).attr("y", top - 22).attr("font-size", 9).attr("fill","#9a6700")
+        .attr("text-anchor","end").text("IRQ here");
+    }
+  });
+
+  const okColor = raceSim.outcome.startsWith("SAFE") || raceSim.outcome.startsWith("no race") ? "#2ea043" : "#cf222e";
+  svg.append("rect").attr("x", 20).attr("y", top + rowH + 30).attr("width", width - 40).attr("height", 70)
+    .attr("rx", 6).attr("fill", okColor + "15").attr("stroke", okColor).attr("stroke-width", 1.5);
+  svg.append("text").attr("x", 34).attr("y", top + rowH + 55).attr("font-size", 13).attr("font-weight", 700)
+    .attr("fill", okColor).text(raceSim.outcome);
+  const wrapped = raceSim.detail.match(/.{1,84}(\s|$)/g) || [raceSim.detail];
+  wrapped.slice(0,3).forEach((line, i) => {
+    svg.append("text").attr("x", 34).attr("y", top + rowH + 74 + i*14).attr("font-size", 10).attr("fill", "#24292f")
+      .text(line.trim());
+  });
+
+  return svg.node();
+}
+
+raceWidget
+```
+
+I swept the slider across all six injection points — arriving before each instruction, plus one setting past the end, meaning the interrupt shows up after `wfi` has already retired and isn't part of the race at all — and compared naive against protected at every one. What I found in the naive build is one shape of failure that's live across most of the window: any injection point before `wfi` retires lets the handler preempt immediately, service the flag, clear the pending bit, and return, leaving `wfi` with nothing to see when it finally runs. The protected build narrowed that failure down to a single remaining case, and it's not the case I originally set out to fix: an interrupt arriving *before* `cpsid i` has even executed, which isn't really "the race" so much as "the interrupt beat the mitigation to the starting line" — no amount of masking-after-arrival can help there, because the handler already ran before the mask existed, and I don't think there's a fix for that one within this loop shape at all. For every injection point after that, up through `wfi` itself, the protected build came back safe every time I checked, and the mechanism is the one piece of architecture I genuinely hadn't known going in: `wfi` doesn't consult `PRIMASK` to decide whether it's allowed to sleep. It checks whether an interrupt is currently pending, full stop, mask or no mask, and if one is, it treats itself as a near-no-op and falls straight through instead of sleeping — which means the interrupt that `cpsid i` kept from being *serviced* is still allowed to be *seen*, and that's the entire trick I was missing.
+
+I sat with that one for a while, because it's genuinely counterintuitive if you think of `PRIMASK` the way I did going in — as a wall that makes the CPU deaf to interrupts. It isn't. It's a wall around the *handler*, not around the *pending bit*, and `wfi` reads the pending bit directly, on the other side of that wall.
+
+The fix itself ended up being two instructions bracketing the poll, which felt anticlimactic after how much time I'd spent understanding why it worked:
+
+```
+cpsid i
+while (!packet_ready) { }
+__WFI();
+cpsie i
+```
+
+I want to flag the part of this I find genuinely elegant, because I don't get to say that often about a two-instruction fix. A software mutex could not have solved this — I actually tried reasoning through one before I found the `cpsid`/`cpsie` approach, and every version I sketched had the same shape of problem: if I disable interrupts to "hold the lock" around the check, I also can't be woken up while holding it, so I'd just be trading a rare lost-wakeup for a guaranteed one. If I release the lock any earlier than the `wfi` instruction itself, I've reopened exactly the gap I was trying to close. The reason `cpsid`/`cpsie` around the *entire* poll-and-sleep sequence works, and a narrower critical section doesn't, is that it's not actually acting as a mutex at all — I was thinking about it wrong for most of an afternoon. It's not preventing the race. It's changing what "winning" the race means. With masking on, the interrupt can still arrive at any point and still gets marked pending, but the *handler* — the part that would clear that pending bit — can't run until `cpsie i`, which by construction happens after `wfi` has already had its one chance to check. There's no version of events where the pending bit gets cleared before `wfi` looks at it, because the only code that clears it is now provably ordered after `wfi`. I didn't design that ordering guarantee on purpose the first time I wrote it; I found it by accident, got suspicious of my own luck, and then went and figured out why it wasn't luck.
+
+Here's the twin's log after I shipped the fix and re-ran the exact interrupt-during-the-gap injection that used to hang it forever:
+
+```{ojs}
+//| echo: false
+successLog = [
+  "[11:14:52.100] [MAIN] cpsid i — entering protected poll",
+  "[11:14:52.100] [MAIN] Flag is 0. CPU preparing to enter low-power WFI sleep...",
+  "[11:14:52.101] USART1_IRQHandler: rx byte 0x7E — packet_ready = 1 (injected mid-gap, as before)",
+  "[11:14:52.101]   NVIC: interrupt now PENDING (handler entry deferred — PRIMASK set)",
+  "[11:14:52.101] [MAIN] wfi executing...",
+  "[11:14:52.101]   wfi: pending interrupt detected — sleep refused, falling through",
+  "[11:14:52.102] [MAIN] cpsie i — unmasking",
+  "[11:14:52.102] USART1_IRQHandler: now entering (was pending, mask lifted)",
+  "[11:14:52.102] [MAIN] packet_ready observed = 1, servicing packet",
+  "[11:14:52.103] System continuing normally."
+]
+
+html`<div style="background:#0d1117;color:#c9d1d9;padding:1.1rem 1.3rem;border-radius:6px;font-family:${mono};font-size:0.82rem;line-height:1.65;overflow-x:auto;white-space:pre;">${successLog.join("\n")}</div>`
+```
+
+Same injection point that used to be an unrecoverable sleep is now a nine-microsecond-ish detour through a `wfi` that declines to do its job. I ran that same injection at all six points in the sweep after shipping, not just the one that used to fail, because I've been burned before by a fix that only fixes the specific repro I happened to be looking at.
+
+Thanks to a coworker who sat with me through an actual whiteboard session on the PRIMASK/pending-bit distinction after I'd clearly gotten it wrong out loud once already, and to whoever wrote the FreeRTOS Cortex-M port layer, which I read considerably more carefully after Act I than I had before it.[^naming]
+
+[^naming]: (yes, I do find it a little silly to thank a port layer by name in a footnote, but I went back and forth on whether "read the source of the thing you're using" belongs in the acknowledgments or just as a fact about how I spent an evening, and I landed on: if I'm going to credit a coworker for a whiteboard session, the port layer earns equivalent credit for the two hours I spent stepping through `vPortSVCHandler` and `xPortPendSVHandler` line by line, which is where I actually confirmed the "PendSV and SysTick must sit at the lowest priority" convention wasn't just folklore — it's load-bearing for the exact preemption assumption I'd violated.
+
+[^renode]: I ran all of this on Renode rather than physical silicon, and I want to be honest about where that particular digital twin diverges from a real chip, because "fully reproducible" is doing a lot of work in how I've framed this post and I don't want it to imply "identical to hardware in every respect," which it isn't.
+
+    The short version: Renode models the CPU core, the NVIC, and the memory map with enough fidelity that everything in Acts I through III reproduces identically on every run, and identically to what I originally saw on the actual board — I checked this specifically, because a digital twin that can't reproduce the original failure isn't a debugging tool, it's a different program that happens to also crash. But a few peripherals on this particular chip are either unmodeled or modeled at a level of abstraction that wouldn't have let me catch this class of bug if the bug had lived there instead. The DMA request multiplexer (DMAMUX) on this part is one of them — Renode's platform description for this board treats DMA channel routing as effectively static, wired at platform-definition time, rather than modeling the runtime-programmable mux register the way silicon actually implements it. If I'd had a bug that depended on reprogramming DMAMUX mid-flight and racing that reprogram against an in-flight DMA transfer, I don't think Renode would have shown it to me; I think it would have either silently used whatever routing was in the platform file or thrown a model-level exception that looks nothing like what silicon would actually do, which is arguably worse than not catching the bug at all, because it would have looked like a clean pass instead of an unmodeled gap.
+
+    CRC peripheral behavior is a smaller version of the same story — I hit an unrelated issue while working on a checksum routine earlier in this project where Renode's CRC unit's default polynomial and initial-value behavior didn't match the reference manual's stated reset values closely enough for a byte-for-byte comparison against known-good test vectors, and I never fully root-caused whether that was a Renode modeling gap, a difference in which specific silicon revision the platform file was targeting, or a misconfiguration on my end — I worked around it by explicitly programming every CRC register instead of relying on any reset default, which is probably better practice anyway, but I want to flag that I'm citing this as "a thing I noticed," not as "a thing I fully diagnosed," because I didn't put in the hours to be sure.
+
+    There's a broader category here that's worth naming even though I can't give it the same specificity: analog and mixed-signal peripheral behavior — ADC noise characteristics, comparator hysteresis, anything where the real chip's behavior is a function of actual voltages and actual silicon process variation — is modeled at whatever fidelity the platform description author chose to give it, which for a lot of open platform files is "returns a value in the right ballpark" rather than "matches this chip's datasheet curves." None of the three bugs in this post touch analog peripherals, so it doesn't affect anything above, but if you're reading this because you're evaluating Renode for your own project and wondering whether it'll catch *your* bug, the honest answer is: check what platform description you're using, read it, and specifically check whether the peripherals your bug depends on are modeled behaviorally or just stubbed to not crash. The NVIC and core pipeline modeling — which is what all three of my bugs actually depended on — I'd vouch for without much hedging at this point, because I cross-checked it against the original hardware failure for all three and it matched. I would not extend that same confidence to DMAMUX, CRC reset behavior, or anything analog on this particular platform file without doing the same cross-check first, and I haven't done that cross-check, so I'm not going to imply I have.
+
+    One more thing while I'm in the digression: none of this is a knock on Renode specifically. Every simulator trades fidelity somewhere to be fast and deterministic, and the alternative — a bit-accurate SPICE-level model of the entire chip — would be too slow to run the thousands of injection-sweep iterations I ran to build the widget in Act III. The tool did exactly what I needed it to do for the bugs I actually had. I just don't want anyone reading this to walk away thinking "digital twin" is a synonym for "identical to silicon in all respects," because for this specific platform file, on these specific peripherals, it demonstrably isn't, and I'd rather say that plainly in a footnote than have someone find out the hard way on a DMAMUX bug that Renode quietly can't show them.
+
+[^cliffle]: While I'm on the subject of WFI-adjacent traps I did *not* hit but went looking for after Act III, because once I'd been bitten by one WFI surprise I went and read up on others: there's a documented STM32 erratum, written up in detail by Cliffle, involving pipeline corruption specific to executing `wfi` from certain address alignments while interrupts are disabled — instruction addresses ending in particular nibble patterns relative to a 16-byte boundary triggering incorrect behavior on resume. It's a genuinely different bug from the lost-wakeup race in this post — it's an address-alignment-dependent silicon erratum, not a logical race condition, and it requires interrupts to already be disabled going into the `wfi`, which is closer to my *fixed* build's state than my naive one. I mention it because it's a good reminder that "I found the WFI bug in my code" and "I've now accounted for every way WFI can bite me" are different claims, and I want to be honest that I only have confidence in the first one.
+
+### Appendix: the attempts ledger
+
+I said in the outline that I'd rather show you what didn't work than just assert the final fix, so here's every attempt I logged across both versions, in order, filterable and sortable rather than dumped as one long list, because by the time I was done there were more rows here than I expected there to be when I started writing this down.
+
+```{ojs}
+//| echo: false
+ledgerData = [
+  {version: "v6", n: 1, attempt: "Wrapped context switch body in a critical section (disable-all-IRQ around the whole switcher)", result: "Fault stopped, but so did USART throughput — measured 40%+ drop under load", verdict: "reverted"},
+  {version: "v6", n: 2, attempt: "Raised USART1 priority number to 2, reasoning 'give PendSV more headroom'", result: "Fault frequency dropped but didn't reach zero — same bug, just needed a longer stress run to surface", verdict: "wrong diagnosis"},
+  {version: "v6", n: 3, attempt: "Read SHPR3 at runtime and logged it — confirmed reset value 0x00000000, PendSV at priority 0", result: "This is the moment I actually understood the bug instead of guessing at it", verdict: "diagnostic breakthrough"},
+  {version: "v6", n: 4, attempt: "SCB->SHPR3 |= (0xFF << 16) — PendSV to lowest priority", result: "Fault eliminated across a multi-hour stress run in the twin", verdict: "shipped"},
+  {version: "v6", n: 5, attempt: "Re-ran the same fault trace after the SHPR3 fix, expecting a clean pass", result: "Still faulted, less often — different bug hiding behind the first one", verdict: "led to Act II"},
+  {version: "v6", n: 6, attempt: "objdump -d on the built ELF, one invocation, looked at the actual PendSV handler bytes", result: "Found the compiler-emitted push {r7, lr} eating the EXC_RETURN token", verdict: "diagnostic breakthrough"},
+  {version: "v6", n: 7, attempt: "__attribute__((naked)) on the handler, tested at -O0 only", result: "Passed my existing trace", verdict: "shipped (incorrectly)"},
+  {version: "v6", n: 8, attempt: "Re-tested the naked build at -O1 after a GCC point-release bump, three days later", result: "Failed intermittently — traced to C statements mixed into the naked body", verdict: "regression"},
+  {version: "v6", n: 9, attempt: "Rewrote handler body as a single asm volatile block, zero embedded C statements", result: "Passed at -O0 through -Os, and across the GCC bump that broke attempt 7", verdict: "shipped"},
+  {version: "v9", n: 1, attempt: "Added a 1ms delay before WFI, reasoning 'give interrupts time to land first'", result: "Made the race rarer, not absent — a delay narrows a window, it doesn't close it", verdict: "wrong approach"},
+  {version: "v9", n: 2, attempt: "Software flag-based mutex around the poll-and-sleep block", result: "Either blocked wakeup entirely (if held through wfi) or reopened the exact gap (if released early) — no version of this closes the race", verdict: "wrong approach, reasoned out"},
+  {version: "v9", n: 3, attempt: "Disassembled the polling loop to count the actual instruction gap", result: "5 instructions, single-digit nanoseconds at 480MHz — narrower than my prior guess, not wider", verdict: "diagnostic breakthrough"},
+  {version: "v9", n: 4, attempt: "cpsid i before the poll, cpsie i after wfi", result: "Injection-sweep across all 6 points: safe everywhere except pre-cpsid arrival, which isn't fixable within this loop shape", verdict: "shipped"}
+]
+
+viewof ledgerFilter = Inputs.radio(["all", "v6", "v9"], {value: "all", label: "filter by version"})
+```
+
+```{ojs}
+//| echo: false
+viewof ledgerSort = Inputs.select(["order logged", "verdict"], {value: "order logged", label: "sort by"})
+```
+
+```{ojs}
+//| echo: false
+ledgerFiltered = ledgerFilter === "all" ? ledgerData : ledgerData.filter(r => r.version === ledgerFilter)
+
+ledgerSorted = ledgerSort === "order logged"
+  ? ledgerFiltered
+  : [...ledgerFiltered].sort((a,b) => a.verdict.localeCompare(b.verdict))
+
+verdictColor = v => ({
+  "shipped": "#2ea043",
+  "diagnostic breakthrough": "#0969da",
+  "reverted": "#cf222e",
+  "wrong diagnosis": "#9a6700",
+  "wrong approach": "#9a6700",
+  "wrong approach, reasoned out": "#9a6700",
+  "led to Act II": "#8250df",
+  "shipped (incorrectly)": "#cf222e",
+  "regression": "#cf222e"
+})[v] || "#57606a"
+
+ledgerTable = {
+  const div = html`<div style="font-family:${mono};font-size:0.78rem;"></div>`;
+  const rows = ledgerSorted.map(r => `
+    <tr>
+      <td style="padding:6px 10px;border-bottom:1px solid #eaeef2;color:#57606a;white-space:nowrap;">${r.version}.${r.n}</td>
+      <td style="padding:6px 10px;border-bottom:1px solid #eaeef2;">${r.attempt}</td>
+      <td style="padding:6px 10px;border-bottom:1px solid #eaeef2;color:#57606a;">${r.result}</td>
+      <td style="padding:6px 10px;border-bottom:1px solid #eaeef2;white-space:nowrap;">
+        <span style="color:${verdictColor(r.verdict)};font-weight:600;">${r.verdict}</span>
+      </td>
+    </tr>`).join("");
+  div.innerHTML = `<table style="border-collapse:collapse;width:100%;">
+    <thead><tr style="text-align:left;border-bottom:2px solid #d0d7de;">
+      <th style="padding:6px 10px;">#</th><th style="padding:6px 10px;">attempt</th>
+      <th style="padding:6px 10px;">result</th><th style="padding:6px 10px;">verdict</th>
+    </tr></thead>
+    <tbody>${rows}</tbody></table>`;
+  return div;
+}
+
+ledgerTable
+```
+
+Thirteen logged attempts across two bugs I initially described, in the outline, as three fixes. Four of the thirteen are marked "diagnostic breakthrough" rather than "shipped" or "wrong approach" — which in retrospect is the actual ratio I'd expect from this kind of debugging, and not a ratio I'd have guessed correctly if you'd asked me to pre-register it before I built this table. Most of the value in most debugging sessions I've had isn't the fix, it's the moment three or four attempts earlier where I finally asked the question that made the fix obvious.

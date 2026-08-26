@@ -25,6 +25,10 @@ sim/uart_output.log*
 EDP_COMPLETE_HANDOFF.md
 devlogs.md
 styles.css
+docs/architecture.md
+docs/protocol.md
+docs/roadmap.md
+docs/verification.md
 
 # Thesis and IEEE paper (not needed on GitHub)
 EDP_M7_Thesis_LaTeX_Source/
