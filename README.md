@@ -1,98 +1,73 @@
-# Deterministic Radar-Inertial Georeferencing & Target Tracking Coprocessor
+# Radar-Inertial Georeferencing Coprocessor
 
-A bare-metal firmware pipeline for the ARM Cortex-M7 (STM32H753XI) that solves the spatial drift problem in drone-based radar search-and-rescue. Sits between the flight controller and the radar SoC's digital backend, ingesting high-rate MAVLink attitude data, hardware-timestamping incoming radar frames, running a fixed-point Extended Kalman Filter to compensate for drone motion, and outputting precisely georeferenced target coordinates.
+**STM32H753XI | Bare-metal C | ARM Cortex-M7**
 
-## Why This Exists
+This is my project for solving the spatial drift problem in drone-based radar search-and-rescue. When a radar detects someone under rubble, the raw detection says "range bin 47" — but the drone is moving, so that bin doesn't map to the same spot on the ground a second later. This coprocessor sits between the flight controller and the radar, takes in MAVLink attitude data, timestamps radar frames with microsecond precision, runs a fixed-point EKF to compensate for drone motion, and outputs actual lat/long coordinates.
 
-A radar detects a human breathing signature beneath the rubble. The raw detection says "range bin 47." But the drone is moving forward at 3 m/s and shifting due to wind. Range bin 47 at time T1 does not map to the same physical spot on the ground as range bin 47 at time T2. Without instantly translating local radar detections into global GPS/SLAM coordinates by factoring in the drone's exact attitude (roll, pitch, yaw) and velocity at the exact microsecond of the radar sweep, the rescue map drifts by meters. The visual overlay becomes useless.
+## The Problem
 
-You cannot run this tight attitude-to-radar synchronization on a Linux companion computer. OS scheduling jitter introduces milliseconds of latency spikes — an eternity when the drone moves centimeters in that time. This is where the STM32H7 Cortex-M7 core becomes indispensable: deterministic, low-latency, real-time peripheral handling and sensor fusion with zero OS overhead.
+A radar detects a breathing human under rubble. But the drone is moving at 3 m/s and drifting with wind. Without translating that detection into global coordinates at the exact microsecond of the radar sweep, the rescue map drifts by meters. You can't run this on a Linux companion computer — OS jitter introduces milliseconds of latency spikes, which is forever when the drone moves centimeters in that time. That's why we need a microcontroller: deterministic, low-latency, zero OS overhead.
 
-## System Context
+## How It Works
 
 ```
 Pixhawk (PX4/ArduPilot)
         │
         │ MAVLink @ 100+ Hz
-        │ (ATTITUDE, LOCAL_POSITION_NED, GLOBAL_POSITION_INT)
         ▼
-┌─────────────────────────────────┐
-│   STM32H753XI Coprocessor       │
-│   ┌───────────────────────────┐ │
-│   │ Zero-Copy MAVLink Parser  │ │◄── DMA circular buffer, no CPU overhead
-│   │ Hardware Timer Sync       │ │◄── Microsecond timestamps on radar frame-sync
-│   │ Lock-Free State Buffer    │ │◄── Rolling kinematic history window
-│   │ Fixed-Point EKF           │ │◄── CMSIS-DSP matrix operations
-│   │ Coordinate Transform      │ │◄── Polar radar → ENU → lat/long
-│   │ Deterministic Output      │ │──► SPI/USB-CDC to ground laptop
-│   └───────────────────────────┘ │
-└─────────────────────────────────┘
+┌─────────────────────────────┐
+│   STM32H753XI Coprocessor   │
+│                             │
+│  DMA MAVLink Parser         │ ← zero-copy, no CPU overhead
+│  Hardware Timer Sync        │ ← microsecond timestamps
+│  Lock-Free Ring Buffer      │ ← rolling state history
+│  Fixed-Point EKF            │ ← CMSIS-DSP matrix ops
+│  Coordinate Transform       │ │ polar → ENU → lat/long
+│  Output Stream              │ → SPI/USB-CDC
+└─────────────────────────────┘
         │
-        │ Georeferenced target metadata
-        │ (lat, long, altitude, confidence, timestamp)
         ▼
-Ground Laptop UI Overlay
+Ground Laptop (target overlay)
 ```
 
-## What's Inside
+## What's in This Repo
 
-`src/` contains the firmware for the STM32H753XI, organized by pipeline stage:
+- `src/` — firmware source, organized by pipeline stage
+- `sim/` — Renode simulation scripts
+- `scripts/` — build Makefile
+- `docs/` — architecture notes, engineering notebook, verification
 
-- **Bare-metal boot** — vector table, Reset_Handler, USART debug output
-- **MAVLink DMA parser** — zero-copy UART ingestion with DMA circular buffers and L1 D-Cache coherency
-- **Hardware timer synchronization** — microsecond-precision timestamping bound to radar frame-sync interrupt
-- **Lock-free ring buffer** — thread-safe kinematic state history for back-projection calculations
-- **Fixed-point EKF** — optimized Extended Kalman Filter using CMSIS-DSP matrix libraries
-- **Coordinate transformation** — polar radar coordinates to ENU/lat-long with velocity vector stripping
-- **Deterministic output** — binary frame packaging over SPI/USB-CDC to ground station
+## Things That Broke (and How I Fixed Them)
 
-Plus the linker script (`stm32h753.ld`) and startup code.
+Building bare-metal firmware means you hit problems that an OS would hide from you:
 
-## Things That Broke (and How We Fixed Them)
+- **Vector table misalignment** — CPU booted to the wrong handler. Fixed with `__attribute__((section(".isr_vector")))`.
+- **MAVLink packet loss** — NVIC ISER wasn't enabled and the handler address was missing the Thumb bit. Fixed by setting ISER and OR-ing `| 0x1`.
+- **Struct packing mismatch** — GCC inserted padding in the MAVLink header, shifting all payload data. Fixed with `__attribute__((packed))`.
+- **DMA cache coherency** — CPU read stale cached data instead of fresh DMA writes. Fixed with `SCB_InvalidateDCache_by_Addr()`.
+- **CRC endianness** — hardware CRC processes MSB-first but CPU writes LSB-first. Fixed with `CRC_CR_REV_IN`.
+- **Stack overflow into SDRAM** — linker put the stack in the same region as the state buffer. Fixed by linker script surgery.
+- **PendSV priority inversion** — PendSV at highest priority was preempting fault handlers. Moved to lowest priority.
+- **Compiler clobbering EXC_RETURN** — GCC's prologue overwrote the hardware token in `lr`. Fixed with `__attribute__((naked))`.
+- **Queue race condition** — non-ISR-safe API called from interrupt context. Fixed with `xQueueSendFromISR`.
+- **WFI lost-wakeup race** — interrupt fired between check and sleep. Fixed with PRIMASK critical sections.
+- **SDRAM execute fault** — MPU had no region configured. Fixed with `MPU_RASR`.
 
-These are the real bugs that happen when you build a deterministic georeferencing pipeline without a safety net:
-
-- **Vector table misalignment**: The CPU booted to the wrong handler because the vector table wasn't placed in the `.isr_vector` section. Fixed with `__attribute__((section(".isr_vector")))`.
-- **MAVLink packet loss**: NVIC ISER wasn't enabled, and the interrupt handler address was missing the Thumb bit. Fixed by setting `NVIC_ISER` and OR-ing `| 0x1` on the handler address.
-- **Struct packing mismatch**: A 6-byte MAVLink header followed by `float` fields caused GCC to insert 2 bytes of padding, shifting all payload data. Fixed with `__attribute__((packed))`.
-- **DMA cache coherency failure**: DMA writes directly to memory, bypassing the L1 D-Cache. CPU reads stale cached data instead of fresh DMA output. Fixed with `SCB_InvalidateDCache_by_Addr()`.
-- **CRC endianness collision**: The hardware CRC peripheral processes words MSB-first, but the CPU writes them LSB-first, producing wrong checksums. Fixed by enabling `CRC_CR_REV_IN`.
-- **Stack overflow into SDRAM buffer**: The large state buffer and task stack were both placed in AXI SRAM. Fixed by linker script surgery to isolate them.
-- **PendSV priority inversion**: PendSV was set to highest priority, preempting fault handlers. Fixed by moving it to lowest priority via `SCB_SHPR3`.
-- **Compiler clobbering EXC_RETURN**: GCC's function prologue overwrote the hardware's `EXC_RETURN` token in `lr` before inline assembly could read it. Fixed with `__attribute__((naked))` pure assembly handler.
-- **Queue race condition**: Non-ISR-safe queue APIs called from interrupt context caused data corruption. Fixed with `xQueueSendFromISR`.
-- **WFI lost-wakeup race**: Interrupt fired between the WFI check and sleep entry, losing the wakeup. Fixed with PRIMASK critical sections.
-- **SDRAM execute fault**: MPU had no region configured for SDRAM code execution. Fixed with `MPU_RASR` allowing execution (`XN=0`).
-
-## Running This
+## Running It
 
 ```bash
-# Make sure you have arm-none-eabi-gcc and renode installed
 make clean && make simulate
-
-# Output goes to uart_output.log
 ```
 
-The Makefile handles compilation, linking, loading into Renode, and UART output capture. For CRC and MPU validation steps, physical STM32H753XI hardware is required — Renode's models for those peripherals are simplified.
+Output goes to `uart_output.log`. The Makefile handles compilation, linking, loading into Renode, and UART capture. Some things (CRC, MPU) need real hardware — Renode's models for those are simplified.
 
-## Directory Structure
+## What I Learned
 
-| Directory | Description |
-|-----------|-------------|
-| [`src/`](src) | Firmware source — pipeline stages, linker script, startup code |
-| [`sim/`](sim) | Renode simulation script |
-| [`scripts/`](scripts) | Build Makefile |
-| [`docs/`](docs) | Architecture, protocol, verification, roadmap, engineering notebook |
-| [`docs/engineering-notebook/`](docs/engineering-notebook) | 11 numbered devlog entries following the 2-month roadmap |
-
-## Lessons Learned
-
-1. **Spatial drift is a systems problem, not an algorithm problem.** A perfect EKF means nothing if your timestamps are jittery. Determinism starts at the hardware layer.
-2. **The linker is your enemy and your friend.** The large state buffer worked fine until the linker put the stack in the same memory region. Read the `.map` file every time.
-3. **Renode's peripheral models are not complete.** DMAMUX1 isn't modeled. The CRC peripheral is simplified. Cache coherency isn't enforced. We worked around every gap and cross-validated on real hardware.
-4. **ARM exception priorities are non-obvious.** PendSV at priority 0 preempts everything, including fault handlers. Always set it to the lowest priority.
-5. **Volatility is not optional.** Every peripheral register is `((volatile uint32_t *)addr)`. The optimizer *will* reorder your code and break hardware access if you forget it.
-6. **Trust nothing, verify everything.** Every register write was confirmed by reading it back. Every interrupt was tested under load. If it's not in the Renode log or the silicon oscilloscope, it didn't happen.
+1. **Spatial drift is a systems problem, not just an algorithm problem.** A perfect EKF means nothing if your timestamps are jittery.
+2. **The linker is your enemy and your friend.** Things work fine until the linker puts your stack in the same region as your data buffer. Read the `.map` file.
+3. **Renode's peripheral models aren't complete.** DMAMUX1 isn't modeled. Cache coherency isn't enforced. I worked around the gaps and cross-validated on real hardware.
+4. **ARM exception priorities are non-obvious.** PendSV at priority 0 preempts fault handlers. Always lowest priority.
+5. **Trust nothing, verify everything.** Every register write was confirmed by reading it back. Every interrupt was tested under load.
 
 ## License
 

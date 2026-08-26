@@ -1,3 +1,42 @@
+# Build artifacts
+build/
+*.o
+*.bin
+*.elf
+*.map
+
+# LaTeX auxiliary files
+*.aux
+*.log
+*.out
+*.toc
+*.lof
+*.lot
+*.nav
+*.snm
+*.vrb
+*.bbl
+*.blg
+
+# Simulation output
+sim/uart_output.log*
+
+# Redundant docs
+EDP_COMPLETE_HANDOFF.md
+devlogs.md
+styles.css
+docs/architecture.md
+docs/protocol.md
+docs/roadmap.md
+docs/verification.md
+
+# Thesis and IEEE paper (not needed on GitHub)
+EDP_M7_Thesis_LaTeX_Source/
+IEEE_Paper/
+
+# Third-party templates
+IEEE_Paper/ieee-enhanced-main/
+IEEE_Paper/ieee-template.zip
 
 # Automatically ignored untracked files
 EDP_Only_Presentation.aux
