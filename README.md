@@ -2,11 +2,13 @@
 
 **STM32H753XI | Bare-metal C | ARM Cortex-M7**
 
-This is my project for solving the spatial drift problem in drone-based radar search-and-rescue. When a radar detects someone under rubble, the raw detection says "range bin 47" — but the drone is moving, so that bin doesn't map to the same spot on the ground a second later. This coprocessor sits between the flight controller and the radar, takes in MAVLink attitude data, timestamps radar frames with microsecond precision, runs a fixed-point EKF to compensate for drone motion, and outputs actual lat/long coordinates.
+This is my project done during a 2-month internship at Bharat 5G Labs, IIITDM Kurnool, under the guidance of Dr. K. Krishna Naik sir. My main task was to separate the hardware from the software by designing an Edge Data Plane coprocessor that parses drone telemetry and processes it before reaching the server.
 
 ## The Problem
 
-A radar detects a breathing human under rubble. But the drone is moving at 3 m/s and drifting with wind. Without translating that detection into global coordinates at the exact microsecond of the radar sweep, the rescue map drifts by meters. You can't run this on a Linux companion computer — OS jitter introduces milliseconds of latency spikes, which is forever when the drone moves centimeters in that time. That's why we need a microcontroller: deterministic, low-latency, zero OS overhead.
+One critical problem in Cognitive Search and Rescue (CSSR) is spatial drift. When a radar detects a breathing human under rubble, the raw detection says "range bin 47" — but the drone is moving at 3 m/s and drifting with the wind. Without translating that detection into global coordinates at the exact microsecond of the radar sweep, the rescue map drifts by meters. 
+
+You can't run this on a Linux companion computer — OS jitter introduces milliseconds of latency spikes, which is forever when the drone moves centimeters in that time. That's why we need a microcontroller: deterministic, low-latency, zero OS overhead. This coprocessor sits between the flight controller and the radar, parses MAVLink attitude data, timestamps radar frames with microsecond precision, runs a fixed-point EKF to compensate for drone motion, and outputs actual lat/long coordinates to the server.
 
 ## How It Works
 
@@ -43,6 +45,7 @@ Building bare-metal firmware means you hit problems that an OS would hide from y
 
 - **Vector table misalignment** — CPU booted to the wrong handler. Fixed with `__attribute__((section(".isr_vector")))`.
 - **MAVLink packet loss** — NVIC ISER wasn't enabled and the handler address was missing the Thumb bit. Fixed by setting ISER and OR-ing `| 0x1`.
+- **EKF divergence due to matrix aliasing** — CMSIS-DSP `arm_mat_mult_f32` corrupts intermediate matrices if source and destination share the same memory (e.g. `P * H^T` and `K`). Fixed by allocating distinct statically-sized scratch buffers (`scratch_PHT`, `scratch_K`) for every step.
 - **Struct packing mismatch** — GCC inserted padding in the MAVLink header, shifting all payload data. Fixed with `__attribute__((packed))`.
 - **DMA cache coherency** — CPU read stale cached data instead of fresh DMA writes. Fixed with `SCB_InvalidateDCache_by_Addr()`.
 - **CRC endianness** — hardware CRC processes MSB-first but CPU writes LSB-first. Fixed with `CRC_CR_REV_IN`.
