@@ -1,0 +1,79 @@
+--- ekf_original_shipped.c	2026-09-12 02:12:04.551621938 +0000
++++ ekf_corrected.c	2026-09-12 02:12:04.554331470 +0000
+@@ -155,10 +155,13 @@
+     float vn = ekf->x[3], ve = ekf->x[4], vd = ekf->x[5];
+ 
+     float r2 = pn*pn + pe*pe + pd*pd;
+-    float r = sqrtf((r2 > 1e-6f) ? r2 : 1e-6f);
++    if (r2 < 1e-6f) r2 = 1e-6f;               /* FIX: floor r2 itself, not just its sqrt */
++    float r = sqrtf(r2);
+     float range_pred = r;
+ 
+-    float r_ground = sqrtf((pn*pn + pe*pe) > 1e-6f ? (pn*pn + pe*pe) : 1e-6f);
++    float rg2_raw = pn*pn + pe*pe;
++    if (rg2_raw < 1e-6f) rg2_raw = 1e-6f;      /* FIX: floor before use downstream */
++    float r_ground = sqrtf(rg2_raw);
+     float azimuth_pred = atan2f(pe, pn);
+     float elevation_pred = atan2f(-pd, r_ground);
+     float doppler_pred = (vn*pn + ve*pe + vd*pd) / r;
+@@ -198,13 +201,16 @@
+     scratch_H[16] = 0.0f;
+     scratch_H[17] = 0.0f;
+ 
+-    /* Row 3: dDoppler/dx */
+-    scratch_H[18] = (vn*pn*pn + vn*pe*pe + pe*ve*pd - pn*(vn*pn+ve*pe+vd*pd)) / (r2 * r);
+-    scratch_H[19] = (ve*pe*ve + ve*pn*pn + pn*vn*pd - pe*(vn*pn+ve*pe+vd*pd)) / (r2 * r);
+-    scratch_H[20] = (vd*pd*vd + vd*pn*pn + pn*vn*pe - pd*(vn*pn+ve*pe+vd*pd)) / (r2 * r);
++    /* Row 3: dDoppler/dx (FIX: correct analytic partials, verified against
++     * central finite differences; d(doppler)/dp = (v - doppler*p/r)/r ) */
++    float dot_vp = vn*pn + ve*pe + vd*pd;
++    scratch_H[18] = (vn - doppler_pred * pn / r) / r;
++    scratch_H[19] = (ve - doppler_pred * pe / r) / r;
++    scratch_H[20] = (vd - doppler_pred * pd / r) / r;
+     scratch_H[21] = pn / r;
+     scratch_H[22] = pe / r;
+     scratch_H[23] = pd / r;
++    (void)dot_vp;
+ 
+     arm_matrix_instance_f32 matH, matP, matHT, matHP, matHPHT, matR, matS;
+     arm_mat_init_f32(&matH, 4, 6, scratch_H);
+@@ -257,10 +263,37 @@
+     for (uint32_t i = 0; i < 36; i++) scratch_I_KH[i] = -scratch_KH[i];
+     for (int i = 0; i < EKF_STATE_DIM; i++) scratch_I_KH[i*6+i] += 1.0f;
+ 
+-    arm_matrix_instance_f32 matIKH, matPnew;
++    /* FIX: Joseph-form covariance update for numerical stability:
++     *   P_new = (I-KH) P (I-KH)^T + K R K^T
++     * guarantees P_new is symmetric PSD to first order even under
++     * linearization/round-off error, unlike the simplified (I-KH)P form. */
++    static float scratch_IKH_T[EKF_STATE_DIM * EKF_STATE_DIM];
++    static float scratch_IKHP[EKF_STATE_DIM * EKF_STATE_DIM];
++    static float scratch_IKHPIKHt[EKF_STATE_DIM * EKF_STATE_DIM];
++    static float scratch_KR[EKF_STATE_DIM * EKF_MEAS_DIM];
++    static float scratch_KRKt[EKF_STATE_DIM * EKF_STATE_DIM];
++
++    arm_matrix_instance_f32 matIKH, matIKHT, matIKHP, matIKHPIKHt;
+     arm_mat_init_f32(&matIKH, 6, 6, scratch_I_KH);
++    arm_mat_init_f32(&matIKHT, 6, 6, scratch_IKH_T);
++    arm_mat_trans_f32(&matIKH, &matIKHT);
++    arm_mat_init_f32(&matIKHP, 6, 6, scratch_IKHP);
++    arm_mat_mult_f32(&matIKH, &matP, &matIKHP);
++    arm_mat_init_f32(&matIKHPIKHt, 6, 6, scratch_IKHPIKHt);
++    arm_mat_mult_f32(&matIKHP, &matIKHT, &matIKHPIKHt);
++
++    arm_matrix_instance_f32 matR2, matKR, matKt, matKRKt;
++    arm_mat_init_f32(&matR2, 4, 4, ekf->R);
++    arm_mat_init_f32(&matKR, 6, 4, scratch_KR);
++    arm_mat_mult_f32(&matK, &matR2, &matKR);
++    arm_mat_init_f32(&matKt, 4, 6, scratch_HT); /* reuse HT-sized scratch as K^T buffer (4x6) */
++    arm_mat_trans_f32(&matK, &matKt);
++    arm_mat_init_f32(&matKRKt, 6, 6, scratch_KRKt);
++    arm_mat_mult_f32(&matKR, &matKt, &matKRKt);
++
++    arm_matrix_instance_f32 matPnew;
+     arm_mat_init_f32(&matPnew, 6, 6, scratch_Pnew);
+-    arm_mat_mult_f32(&matIKH, &matP, &matPnew);
++    arm_mat_add_f32(&matIKHPIKHt, &matKRKt, &matPnew);
+ 
+     memcpy(ekf->P, scratch_Pnew, sizeof(scratch_Pnew));
+ 

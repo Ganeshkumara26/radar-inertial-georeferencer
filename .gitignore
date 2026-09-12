@@ -104,3 +104,5 @@ protocol/protocol_mavlink_framing_buggy/stm32h753.ld
 rtos/rtos_pendsv_priority_buggy/main.c
 rtos/rtos_pendsv_priority_buggy/startup.c
 rtos/rtos_pendsv_priority_buggy/stm32h753.ld
+
+README_old.md
