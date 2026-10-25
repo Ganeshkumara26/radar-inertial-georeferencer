@@ -19,6 +19,10 @@ void geo_init_reference(geo_reference_t *ref, double lat, double lon, float alt)
     ref->ref_longitude = lon;
     ref->ref_altitude = alt;
     ref->valid = 1;
+    double lat_rad = lat * M_PI / 180.0;
+    ref->cache_N = WGS84_A / sqrt(1.0 - WGS84_E2 * sin(lat_rad) * sin(lat_rad));
+    ref->cache_cos_lat = cos(lat_rad);
+    ref->cache_ok = 1;
 }
 
 void euler_to_quaternion(float roll, float pitch, float yaw, quaternion_t *q) {
@@ -104,16 +108,15 @@ void enu_to_wgs84(const target_enu_t *enu,
         return;
     }
 
-    /* Convert reference lat/lon to radians */
-    double lat_rad = ref->ref_latitude * M_PI / 180.0;
-    (void)ref->ref_longitude; /* used implicitly in dlon calculation below */
-
-    /* Radius of curvature in the prime vertical */
-    double N = WGS84_A / sqrt(1.0 - WGS84_E2 * sin(lat_rad) * sin(lat_rad));
-
-    /* ENU → WGS84 conversion */
+    double N, cos_lat;
+    if (ref->cache_ok) { N = ref->cache_N; cos_lat = ref->cache_cos_lat; }
+    else {
+        double lat_rad = ref->ref_latitude * M_PI / 180.0;
+        N = WGS84_A / sqrt(1.0 - WGS84_E2 * sin(lat_rad) * sin(lat_rad));
+        cos_lat = cos(lat_rad);
+    }
     double dlat = (double)enu->n / (N + (double)ref->ref_altitude);
-    double dlon = (double)enu->e / ((N + (double)ref->ref_altitude) * cos(lat_rad));
+    double dlon = (double)enu->e / ((N + (double)ref->ref_altitude) * cos_lat);
 
     wgs84->latitude = ref->ref_latitude + dlat * 180.0 / M_PI;
     wgs84->longitude = ref->ref_longitude + dlon * 180.0 / M_PI;

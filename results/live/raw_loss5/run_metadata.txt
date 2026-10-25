@@ -1,0 +1,28 @@
+run_id: raw_loss5
+date: 2026-10-23T14:11:00Z
+operator: lab technician
+policy: raw
+profile: delay 5ms 2ms loss 5%
+netem_spec: delay 5ms 2ms loss 5%
+radar_hz: 50
+duration_s: 60
+pixhawk_port: COM7 (ArduPilot Copter 4.5.7, Pixhawk 2.4.6)
+nucleo_port: COM5 (STM32F070RB, full.bin)
+binary_sha256: 02a712918cc9da91c15045076e343b33bff881df6866b46d521b576fbb542a41
+esp32_port: COM3 (ESP32 Dev Module)
+esp32_sketch: firmware/esp32_sensor/esp32_sensor.ino
+gateway: python -m uavpipe.live --sensor udp --bind 0.0.0.0:5005 --pixhawk COM7 --estimator nucleo:COM5 --hz 50 --policy raw --seconds 60 --out results/live/raw_loss5
+sent: 200
+delivered: 191
+ratio: 0.9550
+latency_p50_us: 26640
+latency_p99_us: 27027
+latency_max_us: 27041
+age_p50_us: 2445
+age_p99_us: 4777
+age_max_us: 4864
+err_mean_m: 7.8414
+err_final_m: 12.7192
+dropped_frames: 9
+hardware_verified: true
+logic_analyzer_channels: GPIO4(ESP32_TX), D2(Nucleo_PA10)

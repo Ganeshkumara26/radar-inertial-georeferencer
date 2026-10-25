@@ -1,0 +1,5 @@
+Interface: wlan0 (egress) + ifb0 (ingress, both directions)
+Spec: none
+Not applied (baseline link)
+Removed via: scripts/netem_off.sh wlan0
+Label: Wi-Fi link

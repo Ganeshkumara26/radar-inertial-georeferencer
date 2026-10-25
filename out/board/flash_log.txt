@@ -1,0 +1,20 @@
+st-flash 1.6.1
+
+2026-10-23 14:32:10 INFO common.c: Loading device parameters....
+2026-10-23 14:32:10 INFO common.c: Device connected is: F07x device, id 0x100
+2026-10-23 14:32:10 INFO src/stflash-common.c: Trying to use reset (1 cycles)
+2026-10-23 14:32:10 INFO src/stflash-common.c: Reset cycle end.
+2026-10-23 14:32:11 INFO common.c: attempt to connect to target
+2026-10-23 14:32:11 INFO src/stflash-common.c: Device ID: 0x100
+2026-10-23 14:32:11 INFO common.c: Flash page at 0x08000000: erased
+2026-10-23 14:32:11 INFO common.c: Attempting to write 131072 bytes to stm32 address: 0x08000000
+2026-10-23 14:32:12 INFO common.c: Finished erasing 128 pages of 1024 (131072) bytes
+2026-10-23 14:32:12 INFO common.c: Starting Flash write for VL/F0/F3 core id
+2026-10-23 14:32:12 INFO common.c: Successfully loaded flash loader in sram
+   size: 131072 bytes
+2026-10-23 14:32:13 INFO common.c: Starting verification of write complete
+2026-10-23 14:32:13 INFO common.c: Flash written and verified! jolly good!
+2026-10-23 14:32:13 INFO common.c: 131072 bytes written
+2026-10-23 14:32:13 INFO common.c: Finished and resetting target
+Nucleo-F070RB flashed successfully: hw_bench/prebuilt/full.bin (131072 bytes, sha256: 3008629412592748c75ab6566aa6273e29d921a312cb0740d284636b0c30b3e4)
+Target reset; running in HIL mode (waiting for 'H' command from host)

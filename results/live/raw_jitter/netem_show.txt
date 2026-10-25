@@ -1,0 +1,8 @@
+netem ON on wlan0 (both directions): delay 20ms 20ms loss 0%
+qdisc netem 1: root refcnt 2 bound 1000
+  Send delay 20ms 20ms loss 0%
+qdisc ingress ffff: parent ffff:fff1
+  filter u32 0: protocol ip pref 1 fd 10 action mirred egress redirect dev ifb0
+qdisc netem 1: root refcnt 2 bound 1000
+  Send delay 20ms 20ms loss 0%
+qdisc noqueue 0: root refcnt 2

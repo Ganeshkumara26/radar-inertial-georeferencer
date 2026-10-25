@@ -61,6 +61,8 @@ typedef struct {
     double ref_longitude;  /* degrees */
     float  ref_altitude;   /* meters */
     uint8_t valid;
+    /* cache of per-reference constants (identical arithmetic, computed once in geo_init_reference) */
+    double cache_N, cache_cos_lat; uint8_t cache_ok;
 } geo_reference_t;
 
 /* WGS84 constants */

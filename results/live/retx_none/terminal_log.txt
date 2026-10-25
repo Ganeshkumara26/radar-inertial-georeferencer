@@ -1,0 +1,5 @@
+policy=retx estimator=nucleo:COM5 pixhawk=COM7
+ results=200 rx_stats={'rx': 200, 'bad': 0, 'delivered': 200, 'stale': 0, 'old': 0, 'dup': 0}
+ gateway latency (rx -> estimator result) us: p50=26674 p99=27056 max=27089
+ age at delivery (excess over min delay) us: p50=2406 p99=4764 max=4832
+ log: results/live/retx_none/live_log.csv

@@ -1,0 +1,20 @@
+# Pipeline run: retx_none
+# Policy: retx  Profile: none
+# Rate: 50 Hz  Duration: 4 s  Out: results/live/retx_none
+
+# 1. Bring-up (done once):
+#   python -m uavpipe.doctor        # confirm Nucleo COM port + Pixhawk heartbeat
+
+# 2. Apply link shaping (on the Pi):
+   # no netem - baseline link
+
+# 3. Run the gateway (live_log.csv -> results/live/<folder>/live_log.csv):
+   python -m uavpipe.live --sensor udp --bind 0.0.0.0:5005 \
+       --pixhawk /dev/ttyACM0 --estimator nucleo:/dev/ttyACM1 \
+       --hz 50 --policy retx --seconds 4 --out results/live/retx_none
+
+# 4. Remove link shaping:
+   sudo scripts/netem_off.sh wlan0
+
+# 5. Recompute table from raw log:
+   python -m uavpipe.analyze_live --folder retx_none

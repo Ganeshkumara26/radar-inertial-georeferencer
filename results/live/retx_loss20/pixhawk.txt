@@ -1,0 +1,7 @@
+Pixhawk 2.4.6 (Pixhawk-1 class, STM32F427)
+Autopilot: ArduPilot Copter 4.5.7 (firmware build 2026-08-20)
+System ID: 1, Component ID: 1
+MAVLink dialect: common v2.0
+ATTITUDE stream: requested at 100 Hz via MAV_CMD_SET_MESSAGE_INTERVAL (msg 30, interval 10000 us)
+Serial: /dev/ttyACM0 @ 115200 baud (USB)
+Bench only: propellers OFF, board tilted by hand for attitude excitation.

@@ -1,0 +1,5 @@
+policy=raw estimator=nucleo:COM5 pixhawk=COM7
+ results=163 rx_stats={'rx': 200, 'bad': 0, 'delivered': 163, 'stale': 37, 'old': 0, 'dup': 0}
+ gateway latency (rx -> estimator result) us: p50=26650 p99=26998 max=27033
+ age at delivery (excess over min delay) us: p50=2269 p99=4737 max=4853
+ log: results/live/raw_loss20/live_log.csv

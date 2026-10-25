@@ -1,0 +1,13 @@
+{
+  "hz": 400,
+  "sent": 129,
+  "delivered": 117,
+  "ratio": 0.9069767441860465,
+  "dropped": 12,
+  "mismatched": 10,
+  "age_p50_us": 3250,
+  "age_p99_us": 5975,
+  "age_max_us": 6042,
+  "err_mean_m": 7.9179,
+  "err_final_m": 12.9289
+}

@@ -1,0 +1,18 @@
+st-flash 1.6.1
+
+2026-09-14 09:25:03 INFO common.c: Loading device parameters....
+2026-09-14 09:25:03 INFO common.c: Device connected is: F07x device, id 0x100
+2026-09-14 09:25:03 INFO common.c: Trying to use reset (1 cycles)
+2026-09-14 09:25:03 INFO common.c: Reset cycle end.
+2026-09-14 09:25:04 INFO common.c: attempt to connect to target
+2026-09-14 09:25:04 INFO common.c: Device ID: 0x100
+2026-09-14 09:25:04 INFO common.c: Flash page at 0x08000000: erased
+2026-09-14 09:25:04 INFO common.c: Attempting to write 131072 bytes to stm32 address: 0x08000000
+2026-09-14 09:25:05 INFO common.c: Finished erasing 128 pages of 1024 (131072) bytes
+2026-09-14 09:25:05 INFO common.c: Starting Flash write for VL/F0/F3 core id
+2026-09-14 09:25:05 INFO common.c: Successfully loaded flash loader in sram
+   size: 131072 bytes
+2026-09-14 09:25:06 INFO common.c: Starting verification of write complete
+2026-09-14 09:25:06 INFO common.c: Flash written and verified! jolly good!
+2026-09-14 09:25:06 INFO common.c: 131072 bytes written
+2026-09-14 09:25:06 INFO common.c: Finished and resetting target

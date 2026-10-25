@@ -1,0 +1,5 @@
+policy=deadline estimator=nucleo:COM5 pixhawk=COM7
+ results=185 rx_stats={'rx': 200, 'bad': 0, 'delivered': 185, 'stale': 15, 'old': 0, 'dup': 0}
+ gateway latency (rx -> estimator result) us: p50=26598 p99=27011 max=27017
+ age at delivery (excess over min delay) us: p50=2476 p99=4815 max=4859
+ log: results/live/deadline_loss5/live_log.csv

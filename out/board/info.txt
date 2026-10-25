@@ -1,0 +1,51 @@
+{
+  "board": {
+    "mcu": "STM32F070RB",
+    "arch": "Cortex-M0",
+    "freq_mhz": 48,
+    "flash_kb": 128,
+    "ram_kb": 16,
+    "firmware": "original bench fw (full.bin, HIL mode)",
+    "bin_path": "hw_bench/prebuilt/full.bin",
+    "bin_size_bytes": 131072,
+    "bin_sha256": "02a712918cc9da91c15045076e343b33bff881df6866b46d521b576fbb542a41",
+    "build_date": "2026-09-14",
+    "built_by": "lab workstation",
+    "vref_mv": 3300,
+    "adc_bits": 12,
+    "flash_tool": "st-flash 1.6.1",
+    "flash_date": "2026-09-14T09:25:06Z",
+    "flash_verified": true,
+    "nucleo_port": "COM5",
+    "baud": 460800
+  },
+  "run": {
+    "mode": "verify",
+    "date": "2026-10-24T15:30:00Z",
+    "hz": 50,
+    "seconds": 8.0,
+    "firmware": "original bench fw (full.bin, HIL mode)",
+    "binary_sha256": "02a712918cc9da91c15045076e343b33bff881df6866b46d521b576fbb542a41",
+    "serial_capture_bench": "out/board/serial_capture_bench.txt",
+    "serial_capture_400hz": "out/board/serial_capture_400hz.txt"
+  },
+  "timings": {
+    "ekf_mean_us": 12208.3,
+    "ekf_p99_us": 12387,
+    "ekf_max_us": 12390,
+    "geo_mean_us": 14429.7
+  },
+  "hil": {
+    "hz": 400,
+    "sent": 129,
+    "delivered": 117,
+    "ratio": 0.9069767441860465,
+    "dropped": 12,
+    "mismatched": 10,
+    "age_p50_us": 3250,
+    "age_p99_us": 5975,
+    "age_max_us": 6042,
+    "err_mean_m": 7.9179,
+    "err_final_m": 12.9289
+  }
+}

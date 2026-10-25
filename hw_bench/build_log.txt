@@ -1,0 +1,16 @@
+arm-none-eabi-gcc (GNU Tools for STM32 10.3-2021.10) 10.3.1 20211020 (release)
+Copyright (C) 2021 Free Software Foundation, Inc.
+This is free software; see the source for copying conditions.  There is NO
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+Command line: arm-none-eabi-gcc -O2 -g -Wall -mcpu=cortex-m0 -mthumb -DSTM32F070xB -DUSE_HAL_DRIVER -IInc -IDrivers/STM32F0xx_HAL_Driver/Inc -IDrivers/CMSIS/Include -IDrivers/CMSIS/Device/ST/STM32F0xx/Include -I Middlewares/Third_Party/uav-msglayer -c Src/main.c -o Obj/Debug/Src/main.o
+arm-none-eabi-gcc -O2 -g -Wall -mcpu=cortex-m0 -mthumb -DSTM32F070xB -DUSE_HAL_DRIVER -IInc -IDrivers/STM32F0xx_HAL_Driver/Inc -IDrivers/CMSIS/Include -IDrivers/CMSIS/Device/ST/STM32F0xx/Include -I Middlewares/Third_Party/uav-msglayer -c Src/ekf.c -o Obj/Debug/Src/ekf.o
+arm-none-eabi-gcc -O2 -g -Wall -mcpu=cortex-m0 -mthumb -DSTM32F070xB -DUSE_HAL_DRIVER -IInc -IDrivers/STM32F0xx_HAL_Driver/Inc -IDrivers/CMSIS/Include -IDrivers/CMSIS/Device/ST/STM32F0xx/Include -I Middlewares/Third_Party/uav-msglayer -c Src/geo.c -o Obj/Debug/Src/geo.o
+arm-none-eabi-gcc -O2 -g -Wall -mcpu=cortex-m0 -mthumb -DSTM32F070xB -DUSE_HAL_DRIVER -IInc -IDrivers/STM32F0xx_HAL_Driver/Inc -IDrivers/CMSIS/Include -IDrivers/CMSIS/Device/ST/STM32F0xx/Include -I Middlewares/Third_Party/uav-msglayer -c Src/msglayer_core.c -o Obj/Debug/Src/msglayer_core.o
+arm-none-eabi-gcc -O2 -g -Wall -mcpu=cortex-m0 -mthumb -DSTM32F070xB -DUSE_HAL_DRIVER -IInc -IDrivers/STM32F0xx_HAL_Driver/Inc -IDrivers/CMSIS/Include -IDrivers/CMSIS/Device/ST/STM32F0xx/Include -I Middlewares/Third_Party/uav-msglayer -c Src/hil.c -o Obj/Debug/Src/hil.o
+arm-none-eabi-gcc -O2 -g -Wall -mcpu=cortex-m0 -mthumb -DSTM32F070xB -DUSE_HAL_DRIVER -IInc -IDrivers/STM32F0xx_HAL_Driver/Inc -IDrivers/CMSIS/Include -IDrivers/CMSIS/Device/ST/STM32F0xx/Include -I Middlewares/Third_Party/uav-msglayer -c Src/serial.c -o Obj/Debug/Src/serial.o
+arm-none-eabi-gcc -mcpu=cortex-m0 -mthumb -T Src/STM32F070RBTx_FLASH.ld -Wl,-Map=build/full.map -Wl,--gc-sections -o build/full.elf Obj/Debug/Src/main.o Obj/Debug/Src/ekf.o Obj/Debug/Src/geo.o Obj/Debug/Src/msglayer_core.o Obj/Debug/Src/hil.o Obj/Debug/Src/serial.o -lc -lm -lnosys
+arm-none-eabi-size build/full.elf
+   text    data     bss     dec     hex filename
+  48217      512     2048  50777    c629 build/full.elf
+arm-none-eabi-objcopy -O binary build/full.elf hw_bench/prebuilt/full.bin

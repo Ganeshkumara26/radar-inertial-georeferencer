@@ -1,0 +1,5 @@
+Interface: wlan0 (egress) + ifb0 (ingress, both directions)
+Spec: delay 5ms 2ms loss 20%
+Applied via: scripts/netem_on.sh wlan0 "delay 5ms 2ms loss 20%"
+Removed via: scripts/netem_off.sh wlan0
+Label: Wi-Fi link
